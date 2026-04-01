@@ -1,0 +1,54 @@
+{
+  "name": "pagebraid-mcp",
+  "version": "0.4.0",
+  "description": "A local PDF MCP server with budget-first multimodal PDF reading.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Victor-Quqi/pagebraid-mcp.git"
+  },
+  "homepage": "https://github.com/Victor-Quqi/pagebraid-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/Victor-Quqi/pagebraid-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "pdf",
+    "pdf-reader",
+    "multimodal",
+    "agent",
+    "codex"
+  ],
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "pagebraid-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.1",
+    "@napi-rs/canvas": "^0.1.80",
+    "pdfjs-dist": "^5.4.149",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.3"
+  }
+}
