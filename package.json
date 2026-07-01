@@ -22,7 +22,10 @@
   ],
   "type": "module",
   "main": "dist/index.js",
-  "bin": "dist/index.js",
+  "bin": {
+    "pagebraid-mcp": "dist/index.js",
+    "pagebraid-debug": "dist/cli.js"
+  },
   "files": [
     "dist"
   ],

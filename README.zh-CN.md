@@ -79,6 +79,16 @@ npm run build
 - `image_only` 需要模型能够消费图像内容。
 - 如果模型只支持文本，请使用 `text_only`。
 
+## 调试 CLI
+
+`pagebraid-debug` 通过 stdio 启动 server 并调用 `read_pdf`。返回的 text block 写成 `.txt`，image block 解码成图片，`manifest.json` 保留 MCP block 顺序。
+
+```bash
+pagebraid-debug read-pdf ./paper.pdf --pages 3 --mode auto
+pagebraid-debug read-pdf ./paper.pdf --pages 3 --out .tmp/pagebraid-debug --raw-result
+pagebraid-debug read-pdf ./paper.pdf --server-command node --server-arg dist/index.js
+```
+
 ## 工具
 
 ### `read_pdf`

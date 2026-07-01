@@ -79,6 +79,16 @@ Replace `<path-to-pagebraid-mcp>` with your own local path.
 - `image_only` requires a model that can consume image content.
 - If the model is text-only, use `text_only`.
 
+## Debug CLI
+
+`pagebraid-debug` starts the server over stdio and calls `read_pdf`. Returned text blocks are written as `.txt`, image blocks are decoded to files, and `manifest.json` keeps the MCP block order.
+
+```bash
+pagebraid-debug read-pdf ./paper.pdf --pages 3 --mode auto
+pagebraid-debug read-pdf ./paper.pdf --pages 3 --out .tmp/pagebraid-debug --raw-result
+pagebraid-debug read-pdf ./paper.pdf --server-command node --server-arg dist/index.js
+```
+
 ## Tool
 
 ### `read_pdf`
