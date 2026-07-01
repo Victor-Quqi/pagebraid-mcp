@@ -4,7 +4,6 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
 
 jobs:
   publish:
@@ -24,19 +23,6 @@ jobs:
           cache: npm
 
       - run: npm ci
-
-      - name: Check npm auth
-        if: github.event_name == 'workflow_dispatch'
-        run: npm whoami
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish dry run
-        if: github.event_name == 'workflow_dispatch'
-        run: npm publish --dry-run
-
-      - name: Publish
-        if: github.event_name == 'push'
-        run: npm publish --provenance
+      - run: npm publish --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
