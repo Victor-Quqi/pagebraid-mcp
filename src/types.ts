@@ -1,4 +1,5 @@
 export type ReadMode = "auto" | "text_only" | "image_only";
+export type ImageMimeType = "image/jpeg" | "image/webp";
 
 export interface PageRange {
   start_page: number;
@@ -16,7 +17,7 @@ export interface RenderedPage {
   page_number: number;
   text?: string;
   image_base64?: string;
-  image_mime_type?: "image/jpeg";
+  image_mime_type?: ImageMimeType;
 }
 
 export interface ReadPdfResult {

@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { readPdf } from "../services/pdf-service.js";
 import { ReadPdfInputSchema } from "../schemas/read-pdf.js";
+import { DEFAULT_IMAGE_MIME_TYPE } from "../constants.js";
 
 const READ_PDF_TOOL_NAME = "read_pdf";
 
@@ -82,7 +83,7 @@ function buildReadPdfContent(result: Awaited<ReturnType<typeof readPdf>>): ReadP
       content.push({
         type: "image",
         data: page.image_base64,
-        mimeType: page.image_mime_type ?? "image/jpeg"
+        mimeType: page.image_mime_type ?? DEFAULT_IMAGE_MIME_TYPE
       });
     }
   }

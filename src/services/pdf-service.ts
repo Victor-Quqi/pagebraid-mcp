@@ -1,17 +1,24 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { createCanvas } from "@napi-rs/canvas";
+import { createCanvas, type Canvas } from "@napi-rs/canvas";
 import { getDocument, VerbosityLevel, type PDFDocumentProxy, type PDFPageProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
 
 import {
-  DEFAULT_IMAGE_JPEG_QUALITY,
-  DEFAULT_IMAGE_SCALE,
+  AUTO_BATCH_IMAGE_BUDGET_BYTES,
+  AUTO_SINGLE_PAGE_IMAGE_BUDGET_BYTES,
+  AUTO_SMALL_RANGE_IMAGE_BUDGET_BYTES,
+  DEFAULT_IMAGE_MIME_TYPE,
   DEFAULT_PAYLOAD_BUDGET_CHARS,
+  IMAGE_ONLY_BATCH_IMAGE_BUDGET_BYTES,
+  IMAGE_ONLY_SINGLE_PAGE_IMAGE_BUDGET_BYTES,
+  IMAGE_ONLY_SMALL_RANGE_IMAGE_BUDGET_BYTES,
+  IMAGE_RENDER_QUALITIES,
+  IMAGE_RENDER_SCALES,
   LINE_MERGE_TOLERANCE,
   WORD_BREAK_GAP
 } from "../constants.js";
-import type { PageRange, ReadMode, ReadPdfRequest, ReadPdfResult } from "../types.js";
+import type { ImageMimeType, PageRange, ReadMode, ReadPdfRequest, ReadPdfResult } from "../types.js";
 
 interface PdfTextItemLike {
   str: string;
@@ -22,7 +29,13 @@ interface PdfTextItemLike {
 
 interface EncodedPageImage {
   base64: string;
-  mime_type: "image/jpeg";
+  mime_type: ImageMimeType;
+}
+
+interface ImageRenderPolicy {
+  mime_type: ImageMimeType;
+  target_bytes: number;
+  hint: string | null;
 }
 
 interface CachedPdfDocument {
@@ -31,7 +44,7 @@ interface CachedPdfDocument {
   total_pages: number;
   text_document: PDFDocumentProxy;
   text_pages: Map<number, Promise<string>>;
-  image_pages: Map<number, Promise<EncodedPageImage>>;
+  image_pages: Map<string, Promise<EncodedPageImage>>;
 }
 
 const documentCache = new Map<string, CachedPdfDocument>();
@@ -43,6 +56,7 @@ export async function readPdf(request: ReadPdfRequest): Promise<ReadPdfResult> {
   const mode = request.mode;
   const continuationToolName = request.continuation_tool_name ?? "read_pdf";
   const requestedRange = resolveRequestedRange(request.pages, cachedDocument.total_pages);
+  const imageRenderPolicy = resolveImageRenderPolicy(mode, requestedRange);
 
   const pages: ReadPdfResult["pages"] = [];
   let accumulatedChars = 0;
@@ -50,7 +64,7 @@ export async function readPdf(request: ReadPdfRequest): Promise<ReadPdfResult> {
 
   for (let pageNumber = requestedRange.start_page; pageNumber <= requestedRange.end_page; pageNumber += 1) {
     const text = mode === "image_only" ? undefined : await getPageText(cachedDocument, pageNumber);
-    const image = mode === "text_only" ? undefined : await getPageImage(cachedDocument, pageNumber);
+    const image = imageRenderPolicy ? await getPageImage(cachedDocument, pageNumber, imageRenderPolicy) : undefined;
 
     const estimatedPageChars = estimatePagePayloadChars(text, image?.base64);
     const wouldOverflow =
@@ -74,7 +88,7 @@ export async function readPdf(request: ReadPdfRequest): Promise<ReadPdfResult> {
   if (pages.length === 0) {
     const firstPage = requestedRange.start_page;
     const text = mode === "image_only" ? undefined : await getPageText(cachedDocument, firstPage);
-    const image = mode === "text_only" ? undefined : await getPageImage(cachedDocument, firstPage);
+    const image = imageRenderPolicy ? await getPageImage(cachedDocument, firstPage, imageRenderPolicy) : undefined;
 
     pages.push({
       page_number: firstPage,
@@ -107,7 +121,8 @@ export async function readPdf(request: ReadPdfRequest): Promise<ReadPdfResult> {
     truncateReason,
     mode,
     recommendedNextCall,
-    remainingRanges
+    remainingRanges,
+    imageHint: imageRenderPolicy?.hint ?? null
   });
 
   return {
@@ -247,11 +262,16 @@ async function getPageText(cachedDocument: CachedPdfDocument, pageNumber: number
   return existing;
 }
 
-async function getPageImage(cachedDocument: CachedPdfDocument, pageNumber: number): Promise<EncodedPageImage> {
-  let existing = cachedDocument.image_pages.get(pageNumber);
+async function getPageImage(
+  cachedDocument: CachedPdfDocument,
+  pageNumber: number,
+  policy: ImageRenderPolicy
+): Promise<EncodedPageImage> {
+  const cacheKey = `${pageNumber}:${policy.mime_type}:${policy.target_bytes}`;
+  let existing = cachedDocument.image_pages.get(cacheKey);
   if (!existing) {
-    existing = renderPageImage(cachedDocument.text_document, pageNumber);
-    cachedDocument.image_pages.set(pageNumber, existing);
+    existing = renderPageImage(cachedDocument.text_document, pageNumber, policy);
+    cachedDocument.image_pages.set(cacheKey, existing);
   }
 
   return existing;
@@ -317,22 +337,48 @@ async function extractPageText(textDocument: PDFDocumentProxy, pageNumber: numbe
   }
 }
 
-async function renderPageImage(textDocument: PDFDocumentProxy, pageNumber: number): Promise<EncodedPageImage> {
+async function renderPageImage(
+  textDocument: PDFDocumentProxy,
+  pageNumber: number,
+  policy: ImageRenderPolicy
+): Promise<EncodedPageImage> {
   const page = await textDocument.getPage(pageNumber);
 
   try {
-    const encoded = await renderPageImageAtFixedSettings(page);
+    const encoded = await renderPageImageWithinBudget(page, policy);
     return {
       base64: encoded.toString("base64"),
-      mime_type: "image/jpeg"
+      mime_type: policy.mime_type
     };
   } finally {
     page.cleanup();
   }
 }
 
-async function renderPageImageAtFixedSettings(page: PDFPageProxy): Promise<Buffer> {
-  const viewport = page.getViewport({ scale: DEFAULT_IMAGE_SCALE });
+async function renderPageImageWithinBudget(page: PDFPageProxy, policy: ImageRenderPolicy): Promise<Buffer> {
+  let smallestCandidate: Buffer | null = null;
+
+  for (const scale of IMAGE_RENDER_SCALES) {
+    const canvas = await renderPageToCanvas(page, scale);
+
+    for (const quality of IMAGE_RENDER_QUALITIES) {
+      const encoded = canvas.toBuffer(policy.mime_type, quality);
+
+      if (!smallestCandidate || encoded.length < smallestCandidate.length) {
+        smallestCandidate = encoded;
+      }
+
+      if (encoded.length <= policy.target_bytes) {
+        return encoded;
+      }
+    }
+  }
+
+  return smallestCandidate ?? Buffer.alloc(0);
+}
+
+async function renderPageToCanvas(page: PDFPageProxy, scale: number): Promise<Canvas> {
+  const viewport = page.getViewport({ scale });
   const width = Math.max(1, Math.ceil(viewport.width));
   const height = Math.max(1, Math.ceil(viewport.height));
   const canvas = createCanvas(width, height);
@@ -347,7 +393,45 @@ async function renderPageImageAtFixedSettings(page: PDFPageProxy): Promise<Buffe
     viewport
   }).promise;
 
-  return canvas.toBuffer("image/jpeg", DEFAULT_IMAGE_JPEG_QUALITY);
+  return canvas;
+}
+
+function resolveImageRenderPolicy(mode: ReadMode, requestedRange: PageRange): ImageRenderPolicy | null {
+  if (mode === "text_only") {
+    return null;
+  }
+
+  const pageCount = requestedRange.end_page - requestedRange.start_page + 1;
+  const targetBytes = resolveImageBudgetBytes(mode, pageCount);
+
+  return {
+    mime_type: DEFAULT_IMAGE_MIME_TYPE,
+    target_bytes: targetBytes,
+    hint:
+      pageCount > 1
+        ? "Image detail is compact for multi-page reads; request fewer pages for clearer images."
+        : null
+  };
+}
+
+function resolveImageBudgetBytes(mode: ReadMode, pageCount: number): number {
+  if (mode === "image_only") {
+    if (pageCount === 1) {
+      return IMAGE_ONLY_SINGLE_PAGE_IMAGE_BUDGET_BYTES;
+    }
+
+    return pageCount <= 5
+      ? IMAGE_ONLY_SMALL_RANGE_IMAGE_BUDGET_BYTES
+      : IMAGE_ONLY_BATCH_IMAGE_BUDGET_BYTES;
+  }
+
+  if (pageCount === 1) {
+    return AUTO_SINGLE_PAGE_IMAGE_BUDGET_BYTES;
+  }
+
+  return pageCount <= 5
+    ? AUTO_SMALL_RANGE_IMAGE_BUDGET_BYTES
+    : AUTO_BATCH_IMAGE_BUDGET_BYTES;
 }
 
 function isPdfTextItem(item: unknown): item is PdfTextItemLike {
@@ -388,6 +472,7 @@ function buildSummaryText(input: {
   mode: ReadMode;
   recommendedNextCall: string | null;
   remainingRanges: PageRange[];
+  imageHint: string | null;
 }): string {
   const lines = [
     `PDF file: ${input.filePath}`,
@@ -403,6 +488,10 @@ function buildSummaryText(input: {
     lines.push(`Truncate reason: ${describeTruncateReason(input.truncateReason)}`);
     lines.push(`Remaining ranges: ${remainingText || "none"}`);
     lines.push(`Recommended next call: ${input.recommendedNextCall ?? "none"}`);
+  }
+
+  if (input.imageHint) {
+    lines.push(input.imageHint);
   }
 
   return lines.join("\n");
