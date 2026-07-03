@@ -474,27 +474,35 @@ function buildSummaryText(input: {
   remainingRanges: PageRange[];
   imageHint: string | null;
 }): string {
-  const lines = [
-    `PDF file: ${input.filePath}`,
-    `Mode: ${input.mode}`,
-    `Total pages: ${input.totalPages}`,
-    `Requested range: ${input.requestedRange.start_page}-${input.requestedRange.end_page}`,
-    `Returned range: ${input.returnedRange.start_page}-${input.returnedRange.end_page}`
+  const parts = [
+    "@@PB_META",
+    `file=${input.filePath}`,
+    `mode=${input.mode}`,
+    `total=${input.totalPages}`,
+    `req=${formatPageRange(input.requestedRange)}`,
+    `ret=${formatPageRange(input.returnedRange)}`,
+    `trunc=${input.truncated ? 1 : 0}`
   ];
 
   if (input.truncated) {
-    const remainingText = input.remainingRanges.map(range => `${range.start_page}-${range.end_page}`).join(", ");
-    lines.push("Truncated: yes");
-    lines.push(`Truncate reason: ${describeTruncateReason(input.truncateReason)}`);
-    lines.push(`Remaining ranges: ${remainingText || "none"}`);
-    lines.push(`Recommended next call: ${input.recommendedNextCall ?? "none"}`);
+    parts.push(`reason=${describeTruncateReason(input.truncateReason)}`);
+    parts.push(`rem=${formatPageRanges(input.remainingRanges)}`);
+    parts.push(`next=${input.recommendedNextCall ?? "-"}`);
   }
 
   if (input.imageHint) {
-    lines.push(input.imageHint);
+    parts.push("img=compact");
   }
 
-  return lines.join("\n");
+  return parts.join(" ");
+}
+
+function formatPageRange(range: PageRange): string {
+  return `${range.start_page}-${range.end_page}`;
+}
+
+function formatPageRanges(ranges: PageRange[]): string {
+  return ranges.length > 0 ? ranges.map(formatPageRange).join(",") : "-";
 }
 
 function describeTruncateReason(reason: ReadPdfResult["truncate_reason"]): string {

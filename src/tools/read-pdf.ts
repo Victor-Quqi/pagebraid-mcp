@@ -16,11 +16,9 @@ export function registerReadPdfTool(server: McpServer): void {
     {
       title: "Read PDF Pages",
       description: [
-        "Read a local PDF file and return page text plus rendered page images directly as model-visible content blocks.",
-        "Arguments: file_path is required and must point to a local PDF file. mode is optional and defaults to auto. pages is optional and accepts exactly one of: \"23\", \"23-27\", or \"23-\".",
-        "Behavior: if pages is omitted, the tool reads forward from page 1 until the payload budget is reached or the document ends. If pages is provided, the tool reads as much of that requested range as fits in the payload budget.",
-        "Mode semantics: auto returns both extracted text and rendered page images. text_only returns text without images. image_only returns page images without text.",
-        "When truncation happens, the first text block includes the remaining page range and a ready-to-run recommended next call. Use this tool when the agent needs to actually read or visually inspect the PDF."
+        "Read local PDF pages.",
+        "Output markers: @@PB_META, @@PDF_TEXT p=N, @@PDF_IMAGE p=N.",
+        "Omit pages to start at page 1; large reads may truncate with rem/next in @@PB_META."
       ].join(" "),
       inputSchema: ReadPdfInputSchema,
       annotations: {
@@ -67,19 +65,21 @@ function buildReadPdfContent(result: Awaited<ReturnType<typeof readPdf>>): ReadP
   ];
 
   for (const page of result.pages) {
-    content.push({
-      type: "text",
-      text: `Page ${page.page_number}`
-    });
-
     if (page.text !== undefined) {
       content.push({
         type: "text",
-        text: page.text || "[No extractable text found on this page.]"
+        text: buildPdfTextBlock(page)
       });
     }
 
     if (page.image_base64) {
+      if (page.text === undefined) {
+        content.push({
+          type: "text",
+          text: `@@PDF_IMAGE p=${page.page_number}`
+        });
+      }
+
       content.push({
         type: "image",
         data: page.image_base64,
@@ -89,5 +89,18 @@ function buildReadPdfContent(result: Awaited<ReturnType<typeof readPdf>>): ReadP
   }
 
   return content;
+}
+
+type ReadPdfResult = Awaited<ReturnType<typeof readPdf>>;
+type ReadPdfPage = ReadPdfResult["pages"][number];
+
+function buildPdfTextBlock(page: ReadPdfPage): string {
+  const flags = [
+    page.image_base64 ? "img=next" : null,
+    page.text ? null : "empty=1"
+  ].filter((flag): flag is string => flag !== null);
+  const header = [`@@PDF_TEXT p=${page.page_number}`, ...flags].join(" ");
+
+  return page.text ? `${header}\n${page.text}` : header;
 }
 
