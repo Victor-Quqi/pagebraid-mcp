@@ -6,7 +6,7 @@ const PagesSchema = z
   .string()
   .min(1, "pages cannot be empty")
   .describe(
-    "Optional PDF page selector. Examples: \"23\" for a single page, \"23-27\" for an inclusive range, \"23-\" to read from page 23 until the payload budget or document end."
+    "Optional PDF page selector. Examples: \"23\" for a single page, \"23-27\" for an inclusive range, \"23-\" to read from page 23 until the current response budget or document end."
   )
   .refine(value => /^(\d+|\d+-\d+|\d+-)$/.test(value.trim()), {
     message: "pages must match one of: '23', '23-27', or '23-'"

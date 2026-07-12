@@ -5,20 +5,47 @@ import { createCanvas, type Canvas } from "@napi-rs/canvas";
 import { getDocument, VerbosityLevel, type PDFDocumentProxy, type PDFPageProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
 
 import {
-  AUTO_BATCH_IMAGE_BUDGET_BYTES,
-  AUTO_SINGLE_PAGE_IMAGE_BUDGET_BYTES,
-  AUTO_SMALL_RANGE_IMAGE_BUDGET_BYTES,
+  AUTO_IMAGE_RENDER_SCALE,
+  DEFAULT_IMAGE_CACHE_WIRE_BYTES,
   DEFAULT_IMAGE_MIME_TYPE,
-  DEFAULT_PAYLOAD_BUDGET_CHARS,
-  IMAGE_ONLY_BATCH_IMAGE_BUDGET_BYTES,
-  IMAGE_ONLY_SINGLE_PAGE_IMAGE_BUDGET_BYTES,
-  IMAGE_ONLY_SMALL_RANGE_IMAGE_BUDGET_BYTES,
-  IMAGE_RENDER_QUALITIES,
-  IMAGE_RENDER_SCALES,
+  IMAGE_MAX_EDGE,
+  IMAGE_MAX_ENCODED_BYTES,
+  IMAGE_MAX_PIXELS,
+  IMAGE_ONLY_IMAGE_RENDER_SCALE,
+  IMAGE_RENDER_FALLBACK_QUALITY,
+  IMAGE_RENDER_QUALITY,
+  IMAGE_RENDER_SCALE_MULTIPLIERS,
   LINE_MERGE_TOLERANCE,
   WORD_BREAK_GAP
 } from "../constants.js";
-import type { ImageMimeType, PageRange, ReadMode, ReadPdfRequest, ReadPdfResult } from "../types.js";
+import type {
+  ContentUsageEstimate,
+  ImageResourcePolicy,
+  ImageMimeType,
+  PageRange,
+  ReadMode,
+  ReadPdfRequest,
+  ReadPdfResult,
+  RenderedPage,
+  TokenEstimate,
+  TruncateReason
+} from "../types.js";
+import {
+  estimateClientTokens,
+  fitsClientBudget,
+  resolveClientBudgetPolicy
+} from "./client-budget-policy.js";
+import {
+  findImageResourceOverflow,
+  resolveImageResourcePolicy
+} from "./image-resource-policy.js";
+import { buildPdfImageMarker, buildPdfTextBlock } from "./read-pdf-content.js";
+import {
+  ZERO_CONTENT_USAGE,
+  addContentUsages,
+  estimateImageUsage,
+  estimateTextUsage
+} from "./token-budget.js";
 
 interface PdfTextItemLike {
   str: string;
@@ -30,12 +57,31 @@ interface PdfTextItemLike {
 interface EncodedPageImage {
   base64: string;
   mime_type: ImageMimeType;
+  width: number;
+  height: number;
+  encoded_bytes: number;
+}
+
+interface EncodedImageCandidate {
+  buffer: Buffer;
+  width: number;
+  height: number;
 }
 
 interface ImageRenderPolicy {
   mime_type: ImageMimeType;
-  target_bytes: number;
-  hint: string | null;
+  preferred_scale: number;
+  quality: number;
+  fallback_quality: number;
+  max_edge: number;
+  max_pixels: number;
+  max_encoded_bytes: number;
+}
+
+interface ImageRenderPlan {
+  scale: number;
+  width: number;
+  height: number;
 }
 
 interface CachedPdfDocument {
@@ -44,7 +90,22 @@ interface CachedPdfDocument {
   total_pages: number;
   text_document: PDFDocumentProxy;
   text_pages: Map<number, Promise<string>>;
+  image_plans: Map<string, Promise<ImageRenderPlan>>;
   image_pages: Map<string, Promise<EncodedPageImage>>;
+  image_cache_sizes: Map<string, number>;
+  image_cache_wire_bytes: number;
+}
+
+interface SummaryInput {
+  filePath: string;
+  totalPages: number;
+  requestedRange: PageRange;
+  returnedRange: PageRange;
+  truncated: boolean;
+  truncateReason: ReadPdfResult["truncate_reason"];
+  mode: ReadMode;
+  recommendedNextCall: string | null;
+  remainingRanges: PageRange[];
 }
 
 const documentCache = new Map<string, CachedPdfDocument>();
@@ -56,47 +117,108 @@ export async function readPdf(request: ReadPdfRequest): Promise<ReadPdfResult> {
   const mode = request.mode;
   const continuationToolName = request.continuation_tool_name ?? "read_pdf";
   const requestedRange = resolveRequestedRange(request.pages, cachedDocument.total_pages);
-  const imageRenderPolicy = resolveImageRenderPolicy(mode, requestedRange);
+  const imageRenderPolicy = resolveImageRenderPolicy(mode);
+  const budgetPolicy = request.budget_policy ?? resolveClientBudgetPolicy(undefined);
+  const imageResourcePolicy =
+    request.image_resource_policy ?? resolveImageResourcePolicy();
 
   const pages: ReadPdfResult["pages"] = [];
-  let accumulatedChars = 0;
-  let truncatedByPayload = false;
+  let accumulatedUsage = ZERO_CONTENT_USAGE;
+  let stoppedBy: TruncateReason = "none";
 
   for (let pageNumber = requestedRange.start_page; pageNumber <= requestedRange.end_page; pageNumber += 1) {
     const text = mode === "image_only" ? undefined : await getPageText(cachedDocument, pageNumber);
-    const image = imageRenderPolicy ? await getPageImage(cachedDocument, pageNumber, imageRenderPolicy) : undefined;
+    const imagePlan = imageRenderPolicy
+      ? await getPageImagePlan(cachedDocument, pageNumber, imageRenderPolicy)
+      : undefined;
+    const plannedPage: RenderedPage = {
+      page_number: pageNumber,
+      text,
+      image_width: imagePlan?.width,
+      image_height: imagePlan?.height
+    };
+    const plannedContentUsage = addContentUsages(
+      accumulatedUsage,
+      estimateRenderedPageUsage(plannedPage, imagePlan !== undefined)
+    );
+    const candidateReturnedRange = {
+      start_page: pages[0]?.page_number ?? pageNumber,
+      end_page: pageNumber
+    };
+    const candidateRemainingRanges = collectRemainingRanges(requestedRange, candidateReturnedRange);
+    const candidateTruncated = candidateRemainingRanges.length > 0;
+    const candidateNextCall = candidateTruncated
+      ? buildRecommendedNextCall(filePath, continuationToolName, mode, candidateRemainingRanges[0])
+      : null;
+    const candidateSummaryInput: SummaryInput = {
+      filePath,
+      totalPages: cachedDocument.total_pages,
+      requestedRange,
+      returnedRange: candidateReturnedRange,
+      truncated: candidateTruncated,
+      truncateReason: candidateTruncated ? "client_token_budget" : "none",
+      mode,
+      recommendedNextCall: candidateNextCall,
+      remainingRanges: candidateRemainingRanges
+    };
+    const plannedEstimatedUsage = addContentUsages(
+      plannedContentUsage,
+      estimateTextUsage(buildSummaryText(candidateSummaryInput))
+    );
 
-    const estimatedPageChars = estimatePagePayloadChars(text, image?.base64);
-    const wouldOverflow =
-      pages.length > 0 &&
-      accumulatedChars + estimatedPageChars > DEFAULT_PAYLOAD_BUDGET_CHARS;
-
-    if (wouldOverflow) {
-      truncatedByPayload = true;
+    if (pages.length > 0 && !fitsClientBudget(plannedEstimatedUsage, budgetPolicy)) {
+      stoppedBy = "client_token_budget";
       break;
     }
 
-    pages.push({
+    const plannedImageOverflow = imageRenderPolicy
+      ? findImageResourceOverflow(
+          plannedEstimatedUsage,
+          imageResourcePolicy,
+          budgetPolicy.profile,
+          false
+        )
+      : null;
+    if (pages.length > 0 && plannedImageOverflow) {
+      stoppedBy = plannedImageOverflow;
+      break;
+    }
+
+    const image = imageRenderPolicy && imagePlan
+      ? await getPageImage(cachedDocument, pageNumber, imageRenderPolicy, imagePlan)
+      : undefined;
+    const renderedPage: RenderedPage = {
       page_number: pageNumber,
       text,
       image_base64: image?.base64,
-      image_mime_type: image?.mime_type
-    });
-    accumulatedChars += estimatedPageChars;
-  }
+      image_mime_type: image?.mime_type,
+      image_width: image?.width,
+      image_height: image?.height,
+      image_encoded_bytes: image?.encoded_bytes
+    };
+    const candidateContentUsage = addContentUsages(
+      accumulatedUsage,
+      estimateRenderedPageUsage(renderedPage)
+    );
+    const candidateEstimatedUsage = addContentUsages(
+      candidateContentUsage,
+      estimateTextUsage(buildSummaryText(candidateSummaryInput))
+    );
+    const imageOverflow = imageRenderPolicy
+      ? findImageResourceOverflow(
+          candidateEstimatedUsage,
+          imageResourcePolicy,
+          budgetPolicy.profile,
+          true
+        )
+      : null;
+    if (pages.length > 0 && imageOverflow) {
+      stoppedBy = imageOverflow;
+      break;
+    }
 
-  if (pages.length === 0) {
-    const firstPage = requestedRange.start_page;
-    const text = mode === "image_only" ? undefined : await getPageText(cachedDocument, firstPage);
-    const image = imageRenderPolicy ? await getPageImage(cachedDocument, firstPage, imageRenderPolicy) : undefined;
-
-    pages.push({
-      page_number: firstPage,
-      text,
-      image_base64: image?.base64,
-      image_mime_type: image?.mime_type
-    });
-    truncatedByPayload = requestedRange.end_page > firstPage;
+    pages.push(renderedPage);
+    accumulatedUsage = candidateContentUsage;
   }
 
   const returnedRange = {
@@ -105,8 +227,8 @@ export async function readPdf(request: ReadPdfRequest): Promise<ReadPdfResult> {
   };
 
   const remainingRanges = collectRemainingRanges(requestedRange, returnedRange);
-  const truncateReason = truncatedByPayload ? "payload_budget" : "none";
-  const truncated = truncateReason !== "none" || remainingRanges.length > 0;
+  const truncated = remainingRanges.length > 0;
+  const truncateReason: ReadPdfResult["truncate_reason"] = truncated ? stoppedBy : "none";
   const recommendedNextCall =
     remainingRanges.length > 0
       ? buildRecommendedNextCall(filePath, continuationToolName, mode, remainingRanges[0])
@@ -121,9 +243,15 @@ export async function readPdf(request: ReadPdfRequest): Promise<ReadPdfResult> {
     truncateReason,
     mode,
     recommendedNextCall,
-    remainingRanges,
-    imageHint: imageRenderPolicy?.hint ?? null
+    remainingRanges
   });
+  const finalUsage = addContentUsages(accumulatedUsage, estimateTextUsage(summaryText));
+  const clientEstimate = estimateClientTokens(finalUsage, budgetPolicy);
+  const estimatedTokens: TokenEstimate = {
+    ...finalUsage,
+    client: clientEstimate.detailed,
+    client_coarse: clientEstimate.coarse
+  };
 
   return {
     file_path: filePath,
@@ -135,6 +263,9 @@ export async function readPdf(request: ReadPdfRequest): Promise<ReadPdfResult> {
     returned_pages: pages.map(page => page.page_number),
     truncated,
     truncate_reason: truncateReason,
+    client_profile: budgetPolicy.profile,
+    token_budget: budgetPolicy.token_budget,
+    estimated_tokens: estimatedTokens,
     recommended_next_call: recommendedNextCall,
     pages,
     summary_text: summaryText
@@ -196,7 +327,10 @@ async function getCachedDocument(filePath: string): Promise<CachedPdfDocument> {
     total_pages: textDocument.numPages,
     text_document: textDocument,
     text_pages: new Map(),
-    image_pages: new Map()
+    image_plans: new Map(),
+    image_pages: new Map(),
+    image_cache_sizes: new Map(),
+    image_cache_wire_bytes: 0
   };
 
   documentCache.set(cacheKey, created);
@@ -248,8 +382,32 @@ function clampPage(value: number, totalPages: number, minimum = 1): number {
   return Math.min(Math.max(value, minimum), totalPages);
 }
 
-function estimatePagePayloadChars(text: string | undefined, imageBase64: string | undefined): number {
-  return 384 + (text?.length ?? 0) + (imageBase64?.length ?? 0);
+function estimateRenderedPageUsage(
+  page: RenderedPage,
+  hasImage = Boolean(page.image_base64)
+): ContentUsageEstimate {
+  const estimates: ContentUsageEstimate[] = [];
+
+  if (page.text !== undefined) {
+    estimates.push(estimateTextUsage(buildPdfTextBlock(page, hasImage)));
+  }
+
+  if (hasImage) {
+    if (page.text === undefined) {
+      estimates.push(estimateTextUsage(buildPdfImageMarker(page.page_number)));
+    }
+
+    estimates.push(
+      estimateImageUsage(
+        page.image_width ?? 1,
+        page.image_height ?? 1,
+        page.image_encoded_bytes ?? 0,
+        page.image_base64?.length ?? 0
+      )
+    );
+  }
+
+  return addContentUsages(...estimates);
 }
 
 async function getPageText(cachedDocument: CachedPdfDocument, pageNumber: number): Promise<string> {
@@ -262,19 +420,89 @@ async function getPageText(cachedDocument: CachedPdfDocument, pageNumber: number
   return existing;
 }
 
-async function getPageImage(
+async function getPageImagePlan(
   cachedDocument: CachedPdfDocument,
   pageNumber: number,
   policy: ImageRenderPolicy
-): Promise<EncodedPageImage> {
-  const cacheKey = `${pageNumber}:${policy.mime_type}:${policy.target_bytes}`;
-  let existing = cachedDocument.image_pages.get(cacheKey);
+): Promise<ImageRenderPlan> {
+  const cacheKey = `${pageNumber}:${formatImageRenderPolicy(policy)}`;
+  let existing = cachedDocument.image_plans.get(cacheKey);
   if (!existing) {
-    existing = renderPageImage(cachedDocument.text_document, pageNumber, policy);
-    cachedDocument.image_pages.set(cacheKey, existing);
+    existing = planPageImage(cachedDocument.text_document, pageNumber, policy);
+    cachedDocument.image_plans.set(cacheKey, existing);
+    existing.catch(() => {
+      if (cachedDocument.image_plans.get(cacheKey) === existing) {
+        cachedDocument.image_plans.delete(cacheKey);
+      }
+    });
   }
 
   return existing;
+}
+
+async function getPageImage(
+  cachedDocument: CachedPdfDocument,
+  pageNumber: number,
+  policy: ImageRenderPolicy,
+  plan: ImageRenderPlan
+): Promise<EncodedPageImage> {
+  const cacheKey = `${pageNumber}:${formatImageRenderPolicy(policy)}`;
+  let existing = cachedDocument.image_pages.get(cacheKey);
+  if (!existing) {
+    existing = renderPageImage(cachedDocument.text_document, pageNumber, policy, plan);
+    cachedDocument.image_pages.set(cacheKey, existing);
+    existing.then(
+      image => {
+        if (cachedDocument.image_pages.get(cacheKey) !== existing) {
+          return;
+        }
+
+        const wireBytes = image.base64.length;
+        cachedDocument.image_cache_sizes.set(cacheKey, wireBytes);
+        cachedDocument.image_cache_wire_bytes += wireBytes;
+        evictImageCache(cachedDocument, cacheKey);
+      },
+      () => {
+        if (cachedDocument.image_pages.get(cacheKey) === existing) {
+          cachedDocument.image_pages.delete(cacheKey);
+          cachedDocument.image_cache_sizes.delete(cacheKey);
+        }
+      }
+    );
+  } else {
+    touchImageCacheEntry(cachedDocument, cacheKey, existing);
+  }
+
+  return existing;
+}
+
+async function planPageImage(
+  textDocument: PDFDocumentProxy,
+  pageNumber: number,
+  policy: ImageRenderPolicy
+): Promise<ImageRenderPlan> {
+  const page = await textDocument.getPage(pageNumber);
+
+  try {
+    const baseViewport = page.getViewport({ scale: 1 });
+    const baseWidth = Math.max(baseViewport.width, 1);
+    const baseHeight = Math.max(baseViewport.height, 1);
+    const edgeScale = policy.max_edge / Math.max(baseWidth, baseHeight);
+    const pixelScale = Math.sqrt(policy.max_pixels / (baseWidth * baseHeight));
+    const scale = Math.max(
+      Math.min(policy.preferred_scale, edgeScale, pixelScale),
+      Number.EPSILON
+    );
+    const viewport = page.getViewport({ scale });
+
+    return {
+      scale,
+      width: Math.max(1, Math.ceil(viewport.width)),
+      height: Math.max(1, Math.ceil(viewport.height))
+    };
+  } finally {
+    page.cleanup();
+  }
 }
 
 async function extractPageText(textDocument: PDFDocumentProxy, pageNumber: number): Promise<string> {
@@ -340,41 +568,68 @@ async function extractPageText(textDocument: PDFDocumentProxy, pageNumber: numbe
 async function renderPageImage(
   textDocument: PDFDocumentProxy,
   pageNumber: number,
-  policy: ImageRenderPolicy
+  policy: ImageRenderPolicy,
+  plan: ImageRenderPlan
 ): Promise<EncodedPageImage> {
   const page = await textDocument.getPage(pageNumber);
 
   try {
-    const encoded = await renderPageImageWithinBudget(page, policy);
+    const encoded = await renderPageImageWithinBudget(page, policy, plan);
+    const base64 = encoded.buffer.toString("base64");
     return {
-      base64: encoded.toString("base64"),
-      mime_type: policy.mime_type
+      base64,
+      mime_type: policy.mime_type,
+      width: encoded.width,
+      height: encoded.height,
+      encoded_bytes: encoded.buffer.length
     };
   } finally {
     page.cleanup();
   }
 }
 
-async function renderPageImageWithinBudget(page: PDFPageProxy, policy: ImageRenderPolicy): Promise<Buffer> {
-  let smallestCandidate: Buffer | null = null;
+async function renderPageImageWithinBudget(
+  page: PDFPageProxy,
+  policy: ImageRenderPolicy,
+  plan: ImageRenderPlan
+): Promise<EncodedImageCandidate> {
+  let smallestCandidate: EncodedImageCandidate | null = null;
+  let finalCanvas: Canvas | null = null;
 
-  for (const scale of IMAGE_RENDER_SCALES) {
+  for (const multiplier of IMAGE_RENDER_SCALE_MULTIPLIERS) {
+    const scale = plan.scale * multiplier;
     const canvas = await renderPageToCanvas(page, scale);
+    finalCanvas = canvas;
+    const encoded = canvas.toBuffer(policy.mime_type, policy.quality);
+    const candidate = {
+      buffer: encoded,
+      width: canvas.width,
+      height: canvas.height
+    };
 
-    for (const quality of IMAGE_RENDER_QUALITIES) {
-      const encoded = canvas.toBuffer(policy.mime_type, quality);
+    if (!smallestCandidate || encoded.length < smallestCandidate.buffer.length) {
+      smallestCandidate = candidate;
+    }
 
-      if (!smallestCandidate || encoded.length < smallestCandidate.length) {
-        smallestCandidate = encoded;
-      }
-
-      if (encoded.length <= policy.target_bytes) {
-        return encoded;
-      }
+    if (encoded.length <= policy.max_encoded_bytes) {
+      return candidate;
     }
   }
 
-  return smallestCandidate ?? Buffer.alloc(0);
+  if (finalCanvas) {
+    const encoded = finalCanvas.toBuffer(policy.mime_type, policy.fallback_quality);
+    const candidate = {
+      buffer: encoded,
+      width: finalCanvas.width,
+      height: finalCanvas.height
+    };
+
+    if (!smallestCandidate || encoded.length < smallestCandidate.buffer.length) {
+      smallestCandidate = candidate;
+    }
+  }
+
+  return smallestCandidate ?? { buffer: Buffer.alloc(0), width: 1, height: 1 };
 }
 
 async function renderPageToCanvas(page: PDFPageProxy, scale: number): Promise<Canvas> {
@@ -396,42 +651,69 @@ async function renderPageToCanvas(page: PDFPageProxy, scale: number): Promise<Ca
   return canvas;
 }
 
-function resolveImageRenderPolicy(mode: ReadMode, requestedRange: PageRange): ImageRenderPolicy | null {
+function resolveImageRenderPolicy(mode: ReadMode): ImageRenderPolicy | null {
   if (mode === "text_only") {
     return null;
   }
 
-  const pageCount = requestedRange.end_page - requestedRange.start_page + 1;
-  const targetBytes = resolveImageBudgetBytes(mode, pageCount);
-
   return {
     mime_type: DEFAULT_IMAGE_MIME_TYPE,
-    target_bytes: targetBytes,
-    hint:
-      pageCount > 1
-        ? "Image detail is compact for multi-page reads; request fewer pages for clearer images."
-        : null
+    preferred_scale:
+      mode === "image_only" ? IMAGE_ONLY_IMAGE_RENDER_SCALE : AUTO_IMAGE_RENDER_SCALE,
+    quality: IMAGE_RENDER_QUALITY,
+    fallback_quality: IMAGE_RENDER_FALLBACK_QUALITY,
+    max_edge: IMAGE_MAX_EDGE,
+    max_pixels: IMAGE_MAX_PIXELS,
+    max_encoded_bytes: IMAGE_MAX_ENCODED_BYTES
   };
 }
 
-function resolveImageBudgetBytes(mode: ReadMode, pageCount: number): number {
-  if (mode === "image_only") {
-    if (pageCount === 1) {
-      return IMAGE_ONLY_SINGLE_PAGE_IMAGE_BUDGET_BYTES;
+function formatImageRenderPolicy(policy: ImageRenderPolicy): string {
+  return [
+    policy.mime_type,
+    policy.preferred_scale,
+    policy.quality,
+    policy.fallback_quality,
+    policy.max_edge,
+    policy.max_pixels,
+    policy.max_encoded_bytes
+  ].join(":");
+}
+
+function touchImageCacheEntry(
+  cachedDocument: CachedPdfDocument,
+  cacheKey: string,
+  promise: Promise<EncodedPageImage>
+): void {
+  cachedDocument.image_pages.delete(cacheKey);
+  cachedDocument.image_pages.set(cacheKey, promise);
+
+  const size = cachedDocument.image_cache_sizes.get(cacheKey);
+  if (size !== undefined) {
+    cachedDocument.image_cache_sizes.delete(cacheKey);
+    cachedDocument.image_cache_sizes.set(cacheKey, size);
+  }
+}
+
+function evictImageCache(cachedDocument: CachedPdfDocument, protectedKey: string): void {
+  for (const cacheKey of cachedDocument.image_pages.keys()) {
+    if (cachedDocument.image_cache_wire_bytes <= DEFAULT_IMAGE_CACHE_WIRE_BYTES) {
+      return;
     }
 
-    return pageCount <= 5
-      ? IMAGE_ONLY_SMALL_RANGE_IMAGE_BUDGET_BYTES
-      : IMAGE_ONLY_BATCH_IMAGE_BUDGET_BYTES;
-  }
+    if (cacheKey === protectedKey) {
+      continue;
+    }
 
-  if (pageCount === 1) {
-    return AUTO_SINGLE_PAGE_IMAGE_BUDGET_BYTES;
-  }
+    const size = cachedDocument.image_cache_sizes.get(cacheKey);
+    if (size === undefined) {
+      continue;
+    }
 
-  return pageCount <= 5
-    ? AUTO_SMALL_RANGE_IMAGE_BUDGET_BYTES
-    : AUTO_BATCH_IMAGE_BUDGET_BYTES;
+    cachedDocument.image_pages.delete(cacheKey);
+    cachedDocument.image_cache_sizes.delete(cacheKey);
+    cachedDocument.image_cache_wire_bytes -= size;
+  }
 }
 
 function isPdfTextItem(item: unknown): item is PdfTextItemLike {
@@ -462,18 +744,7 @@ function buildRecommendedNextCall(filePath: string, toolName: string, mode: Read
   return `${toolName}({"file_path":"${escapeJsonString(filePath)}","mode":"${mode}","pages":"${nextRange.start_page}-${nextRange.end_page}"})`;
 }
 
-function buildSummaryText(input: {
-  filePath: string;
-  totalPages: number;
-  requestedRange: PageRange;
-  returnedRange: PageRange;
-  truncated: boolean;
-  truncateReason: ReadPdfResult["truncate_reason"];
-  mode: ReadMode;
-  recommendedNextCall: string | null;
-  remainingRanges: PageRange[];
-  imageHint: string | null;
-}): string {
+function buildSummaryText(input: SummaryInput): string {
   const parts = [
     "@@PB_META",
     `file=${input.filePath}`,
@@ -485,13 +756,9 @@ function buildSummaryText(input: {
   ];
 
   if (input.truncated) {
-    parts.push(`reason=${describeTruncateReason(input.truncateReason)}`);
+    parts.push(`reason=${input.truncateReason}`);
     parts.push(`rem=${formatPageRanges(input.remainingRanges)}`);
     parts.push(`next=${input.recommendedNextCall ?? "-"}`);
-  }
-
-  if (input.imageHint) {
-    parts.push("img=compact");
   }
 
   return parts.join(" ");
@@ -503,15 +770,6 @@ function formatPageRange(range: PageRange): string {
 
 function formatPageRanges(ranges: PageRange[]): string {
   return ranges.length > 0 ? ranges.map(formatPageRange).join(",") : "-";
-}
-
-function describeTruncateReason(reason: ReadPdfResult["truncate_reason"]): string {
-  switch (reason) {
-    case "payload_budget":
-      return "payload budget";
-    default:
-      return "none";
-  }
 }
 
 function escapeJsonString(value: string): string {

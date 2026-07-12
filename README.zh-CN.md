@@ -25,7 +25,7 @@ command = "npx"
 args = ["-y", "pagebraid-mcp"]
 ```
 
-如果你希望 Codex 直接启动本地构建产物，而不是通过 `npx`，可以写成：
+使用本地构建（`<path-to-pagebraid-mcp>` 为本项目的本地目录）：
 
 ```toml
 [mcp_servers]
@@ -35,9 +35,10 @@ command = "node"
 args = ["<path-to-pagebraid-mcp>/dist/index.js"]
 ```
 
-如果使用本地构建产物，先准备项目：
+先进入该目录，再安装依赖并构建：
 
 ```bash
+cd <path-to-pagebraid-mcp>
 npm install
 npm run build
 ```
@@ -57,7 +58,7 @@ npm run build
 }
 ```
 
-如果希望直接运行本地构建产物，把客户端指向编译后的入口文件：
+使用本地构建：
 
 ```json
 {
@@ -70,18 +71,18 @@ npm run build
 }
 ```
 
-把 `<path-to-pagebraid-mcp>` 替换成你自己的本地路径。
-
 ## 模型与使用说明
 
 - PDF 路径必须对运行该 MCP server 的机器可访问。
 - `auto` 返回提取文本和整页图像。
 - `image_only` 需要模型能够消费图像内容。
 - 如果模型只支持文本，请使用 `text_only`。
+- 已针对 Codex 和 Claude Code 调优并完成端到端测试；其它 MCP 客户端暂未测试。
 
 ## 调试 CLI
 
 `pagebraid-debug` 通过 stdio 启动 server 并调用 `read_pdf`。返回的 text block 写成 `.txt`，image block 解码成图片，`manifest.json` 保留 MCP block 顺序。
+当前 shell 中的 `PAGEBRAID_*` 和 `MAX_MCP_OUTPUT_TOKENS` 会传给调试 server。
 
 ```bash
 pagebraid-debug read-pdf ./paper.pdf --pages 3 --mode auto
@@ -103,20 +104,25 @@ pagebraid-debug read-pdf ./paper.pdf --server-command node --server-arg dist/ind
 
 - `"23"`：只读第 23 页
 - `"23-27"`：读取 23 到 27 页
-- `"23-"`：从第 23 页向后读到 payload budget 上限或文档结束
+- `"23-"`：从第 23 页向后读到当前返回预算上限或文档结束
 
 行为：
 
 - `auto` 返回文本和页面图像
 - `text_only` 只返回文本
 - `image_only` 只返回页面图像
+- 返回量会适配检测到的 Codex 和 Claude Code 客户端；未知客户端使用保守回退值
+- 图片清晰度不随请求页数降低；较大的图片读取会按上下文、渲染量和传输量自动分批
 - 发生截断时，返回结果会给出剩余页范围和建议的下一次调用
 
-## 当前状态
+## 预算设置
 
-- 目前主要为 Codex 使用场景设计和调优
-- Claude Code 在处理较大的 MCP 工具返回时，客户端侧可能会截断内容，因此通常更建议直接使用它自带的文档 / PDF 工具
-- 其它 MCP 客户端暂未测试
+以下变量需要配置在 MCP server 的启动环境中：
+
+- `PAGEBRAID_CLIENT_PROFILE` 可显式选择 `codex`、`claude-code` 或 `generic`
+- `PAGEBRAID_TOKEN_BUDGET` 可覆盖检测到的 token 预算
+
+图片资源预算通常无需配置，高级覆盖项见 `docs/implementation-notes.md`。
 
 ## 备注
 

@@ -25,7 +25,7 @@ command = "npx"
 args = ["-y", "pagebraid-mcp"]
 ```
 
-If you want Codex to launch a local build instead of `npx`, use:
+To use a local build (`<path-to-pagebraid-mcp>` is this project's local directory):
 
 ```toml
 [mcp_servers]
@@ -35,9 +35,10 @@ command = "node"
 args = ["<path-to-pagebraid-mcp>/dist/index.js"]
 ```
 
-For a local build, prepare the project with:
+Enter that directory, then install dependencies and build:
 
 ```bash
+cd <path-to-pagebraid-mcp>
 npm install
 npm run build
 ```
@@ -57,7 +58,7 @@ For MCP clients that use a JSON `stdio` server configuration, the equivalent set
 }
 ```
 
-For a local build, point the client at the compiled entry:
+To use a local build:
 
 ```json
 {
@@ -70,18 +71,18 @@ For a local build, point the client at the compiled entry:
 }
 ```
 
-Replace `<path-to-pagebraid-mcp>` with your own local path.
-
 ## Model And Usage Notes
 
 - The PDF path must be accessible on the same machine that runs this MCP server.
 - `auto` returns extracted text and rendered page images.
 - `image_only` requires a model that can consume image content.
 - If the model is text-only, use `text_only`.
+- Tuned and tested end to end for Codex and Claude Code; other MCP clients have not been tested yet.
 
 ## Debug CLI
 
 `pagebraid-debug` starts the server over stdio and calls `read_pdf`. Returned text blocks are written as `.txt`, image blocks are decoded to files, and `manifest.json` keeps the MCP block order.
+`PAGEBRAID_*` and `MAX_MCP_OUTPUT_TOKENS` from the current shell are forwarded to the debug server.
 
 ```bash
 pagebraid-debug read-pdf ./paper.pdf --pages 3 --mode auto
@@ -103,20 +104,25 @@ Input:
 
 - `"23"`: read only page 23
 - `"23-27"`: read pages 23 through 27
-- `"23-"`: read from page 23 onward until the payload budget is reached or the document ends
+- `"23-"`: read from page 23 onward until the current response budget is reached or the document ends
 
 Behavior:
 
 - `auto` returns text plus page images
 - `text_only` returns only text
 - `image_only` returns only page images
+- Response size adapts to detected Codex and Claude Code clients; unknown clients use a conservative fallback
+- Image clarity does not decrease with the requested page count; large image reads are split by context, rendering, and transfer budgets
 - If truncation happens, the response includes the remaining page range and a recommended next call
 
-## Status
+## Budget Overrides
 
-- Primarily built and tuned for Codex
-- Claude Code may aggressively truncate large MCP tool responses on the client side, so its built-in document/PDF tool is usually a better choice there
-- Other MCP clients have not been tested yet
+Set these variables in the MCP server's environment configuration:
+
+- `PAGEBRAID_CLIENT_PROFILE` selects `codex`, `claude-code`, or `generic` explicitly
+- `PAGEBRAID_TOKEN_BUDGET` overrides the detected token budget
+
+Image resource budgets normally need no configuration. Advanced overrides are documented in `docs/implementation-notes.md`.
 
 ## Notes
 

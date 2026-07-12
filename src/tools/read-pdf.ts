@@ -1,8 +1,10 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-import { readPdf } from "../services/pdf-service.js";
-import { ReadPdfInputSchema } from "../schemas/read-pdf.js";
 import { DEFAULT_IMAGE_MIME_TYPE } from "../constants.js";
+import { ReadPdfInputSchema } from "../schemas/read-pdf.js";
+import { resolveClientBudgetPolicy } from "../services/client-budget-policy.js";
+import { readPdf } from "../services/pdf-service.js";
+import { buildPdfImageMarker, buildPdfTextBlock } from "../services/read-pdf-content.js";
 
 const READ_PDF_TOOL_NAME = "read_pdf";
 
@@ -30,11 +32,13 @@ export function registerReadPdfTool(server: McpServer): void {
     },
     async params => {
       try {
+        const budgetPolicy = resolveClientBudgetPolicy(server.server.getClientVersion());
         const result = await readPdf({
           file_path: params.file_path,
           mode: params.mode ?? "auto",
           pages: params.pages,
-          continuation_tool_name: READ_PDF_TOOL_NAME
+          continuation_tool_name: READ_PDF_TOOL_NAME,
+          budget_policy: budgetPolicy
         });
 
         return {
@@ -76,7 +80,7 @@ function buildReadPdfContent(result: Awaited<ReturnType<typeof readPdf>>): ReadP
       if (page.text === undefined) {
         content.push({
           type: "text",
-          text: `@@PDF_IMAGE p=${page.page_number}`
+          text: buildPdfImageMarker(page.page_number)
         });
       }
 
@@ -89,18 +93,5 @@ function buildReadPdfContent(result: Awaited<ReturnType<typeof readPdf>>): ReadP
   }
 
   return content;
-}
-
-type ReadPdfResult = Awaited<ReturnType<typeof readPdf>>;
-type ReadPdfPage = ReadPdfResult["pages"][number];
-
-function buildPdfTextBlock(page: ReadPdfPage): string {
-  const flags = [
-    page.image_base64 ? "img=next" : null,
-    page.text ? null : "empty=1"
-  ].filter((flag): flag is string => flag !== null);
-  const header = [`@@PDF_TEXT p=${page.page_number}`, ...flags].join(" ");
-
-  return page.text ? `${header}\n${page.text}` : header;
 }
 

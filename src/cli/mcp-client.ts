@@ -22,6 +22,7 @@ export async function callReadPdfTool(options: CliOptions): Promise<CallToolResu
       command: options.serverCommand,
       args: options.serverArgs,
       cwd: options.serverCwd,
+      env: getBudgetEnvironment(),
       stderr: "inherit"
     });
 
@@ -54,6 +55,16 @@ export async function callReadPdfTool(options: CliOptions): Promise<CallToolResu
   } finally {
     await client.close().catch(() => undefined);
   }
+}
+
+function getBudgetEnvironment(): Record<string, string> {
+  const entries = Object.entries(process.env).filter(
+    (entry): entry is [string, string] =>
+      entry[1] !== undefined &&
+      (entry[0].startsWith("PAGEBRAID_") || entry[0] === "MAX_MCP_OUTPUT_TOKENS")
+  );
+
+  return Object.fromEntries(entries);
 }
 
 function isCallToolContentResult(value: unknown): value is CallToolResult {
