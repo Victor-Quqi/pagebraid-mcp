@@ -1,4 +1,5 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { CLIENT_INFO_META_KEY } from "@modelcontextprotocol/server";
+import type { McpServer, ServerContext } from "@modelcontextprotocol/server";
 
 import { DEFAULT_IMAGE_MIME_TYPE } from "../constants.js";
 import { ReadPdfInputSchema } from "../schemas/read-pdf.js";
@@ -30,9 +31,9 @@ export function registerReadPdfTool(server: McpServer): void {
         openWorldHint: false
       }
     },
-    async params => {
+    async (params, context) => {
       try {
-        const budgetPolicy = resolveClientBudgetPolicy(server.server.getClientVersion());
+        const budgetPolicy = resolveClientBudgetPolicy(getClientInfo(server, context));
         const result = await readPdf({
           file_path: params.file_path,
           mode: params.mode ?? "auto",
@@ -57,6 +58,33 @@ export function registerReadPdfTool(server: McpServer): void {
         };
       }
     }
+  );
+}
+
+function getClientInfo(
+  server: McpServer,
+  context: ServerContext
+): { name?: string; version?: string } | undefined {
+  const envelope = context.mcpReq.envelope as Record<string, unknown> | undefined;
+  const modernClientInfo = envelope?.[CLIENT_INFO_META_KEY];
+
+  if (isClientInfo(modernClientInfo)) {
+    return modernClientInfo;
+  }
+
+  // Legacy clients provide their identity during initialize only.
+  return server.server.getClientVersion();
+}
+
+function isClientInfo(value: unknown): value is { name?: string; version?: string } {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  return (
+    (candidate.name === undefined || typeof candidate.name === "string") &&
+    (candidate.version === undefined || typeof candidate.version === "string")
   );
 }
 

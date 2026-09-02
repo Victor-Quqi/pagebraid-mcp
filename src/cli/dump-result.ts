@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import type { CallToolResult, ContentBlock } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult, ContentBlock } from "@modelcontextprotocol/client";
 
 import { TOOL_NAME } from "./constants.js";
 import type { CliOptions, Manifest, ManifestBlock, ToolArguments } from "./types.js";
