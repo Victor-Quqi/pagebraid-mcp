@@ -1,6 +1,6 @@
 {
   "name": "pagebraid-mcp",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "A local PDF MCP server with budget-first multimodal PDF reading.",
   "license": "Apache-2.0",
   "repository": {
