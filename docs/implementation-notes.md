@@ -8,6 +8,8 @@
 
 服务端通过 SDK v2 的 `serveStdio` 工厂入口建立连接。入口按每条连接的首个消息选择 2026-07-28 或 2025 时代，并为该连接固定一个独立的 `McpServer` 实例。工具业务层不感知协商过程。调试 CLI 使用 v2 client 的 `versionNegotiation.mode = "auto"`，验证新协议并兼容旧服务。
 
+需要确认实际客户端走的协议时，在 server 环境中设置 `PAGEBRAID_PROTOCOL_DEBUG=1`。服务端会把 `protocol=2026-07-28` 或 `protocol=2025-11-25` 写到 stderr，stdout 的 MCP 流不受影响。
+
 输入约定保持简洁：
 
 - `file_path`：本地 PDF 路径
