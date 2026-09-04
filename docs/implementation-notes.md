@@ -20,6 +20,8 @@
 
 当前使用 `pdfjs-dist` + `@napi-rs/canvas`。
 
+发布包的依赖打包、PDF.js 资源和第三方声明维护见[发布构建](packaging.md)。
+
 这条路线替代了更早的 `pdf-to-img` 方案，主要原因是后者在 Windows 上更容易拉入原生 `canvas` 依赖，安装成本更高。当前实现更适合本项目的本地 `npx` 启动场景。
 
 ## 日志控制

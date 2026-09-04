@@ -1,0 +1,14 @@
+[
+  {
+    "package": "js-tiktoken",
+    "version": "1.0.21",
+    "file": "js-tiktoken.LICENSE",
+    "source": "https://raw.githubusercontent.com/dqbd/tiktoken/4c8b748e07992c00386f3180af5c574b27b65139/LICENSE"
+  },
+  {
+    "package": "pdfjs-dist",
+    "version": "5.6.205",
+    "file": "core-js.LICENSE",
+    "source": "https://raw.githubusercontent.com/zloirock/core-js/v3.48.0/LICENSE"
+  }
+]

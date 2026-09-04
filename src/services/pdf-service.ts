@@ -1,8 +1,12 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { createCanvas, type Canvas } from "@napi-rs/canvas";
 import { getDocument, VerbosityLevel, type PDFDocumentProxy, type PDFPageProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
+
+// Replaced by the release build; source execution uses the installed PDF.js assets.
+declare const __PAGEBRAID_PDFJS_ROOT__: string | undefined;
 
 import {
   AUTO_IMAGE_RENDER_SCALE,
@@ -315,9 +319,10 @@ async function getCachedDocument(filePath: string): Promise<CachedPdfDocument> {
     disableFontFace: true,
     useSystemFonts: true,
     verbosity: VerbosityLevel.ERRORS,
-    cMapUrl: getPdfJsAssetUrl("cmaps"),
+    cMapUrl: getPdfJsAssetPath("cmaps"),
     cMapPacked: true,
-    standardFontDataUrl: getPdfJsAssetUrl("standard_fonts")
+    standardFontDataUrl: getPdfJsAssetPath("standard_fonts"),
+    wasmUrl: getPdfJsAssetPath("wasm")
   });
   const textDocument = await loadingTask.promise;
 
@@ -776,7 +781,11 @@ function escapeJsonString(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
-function getPdfJsAssetUrl(directory: "cmaps" | "standard_fonts"): string {
-  return new URL(`../../node_modules/pdfjs-dist/${directory}/`, import.meta.url).href;
+function getPdfJsAssetPath(directory: "cmaps" | "standard_fonts" | "wasm"): string {
+  const root = typeof __PAGEBRAID_PDFJS_ROOT__ === "string"
+    ? __PAGEBRAID_PDFJS_ROOT__
+    : "../../node_modules/pdfjs-dist/";
+  // PDF.js's Node data factory passes this string directly to fs.readFile.
+  return path.join(fileURLToPath(new URL(root, import.meta.url)), directory) + "/";
 }
 
