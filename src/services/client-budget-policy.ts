@@ -2,12 +2,14 @@ import {
   CLAUDE_CODE_DEFAULT_TOKEN_BUDGET,
   CLAUDE_CODE_FAST_PATH_RATIO,
   CODEX_DEFAULT_TOKEN_BUDGET,
-  GENERIC_DEFAULT_TOKEN_BUDGET
+  GENERIC_DEFAULT_TOKEN_BUDGET,
+  GROK_DEFAULT_BYTE_BUDGET
 } from "../constants.js";
 import type {
   ClientBudgetPolicy,
   ClientBudgetProfile,
-  ContentUsageEstimate
+  ContentUsageEstimate,
+  TruncateReason
 } from "../types.js";
 
 const CLAUDE_CODE_IMAGE_FAST_ESTIMATE = 1_600;
@@ -25,6 +27,17 @@ export function resolveClientBudgetPolicy(
   const explicitBudget = parsePositiveInteger(environment.PAGEBRAID_TOKEN_BUDGET);
 
   switch (profile) {
+    case "grok-build":
+      return {
+        profile,
+        token_budget: explicitBudget,
+        byte_budget:
+          parsePositiveInteger(environment.PAGEBRAID_BYTE_BUDGET) ??
+          parsePositiveInteger(environment.GROK_MAX_MCP_OUTPUT_BYTES) ??
+          parsePositiveInteger(environment.MAX_MCP_OUTPUT_BYTES) ??
+          GROK_DEFAULT_BYTE_BUDGET,
+        counts_images: false
+      };
     case "claude-code":
       return {
         profile,
@@ -32,18 +45,21 @@ export function resolveClientBudgetPolicy(
           explicitBudget ??
           parsePositiveInteger(environment.MAX_MCP_OUTPUT_TOKENS) ??
           CLAUDE_CODE_DEFAULT_TOKEN_BUDGET,
+        byte_budget: null,
         counts_images: true
       };
     case "codex":
       return {
         profile,
         token_budget: explicitBudget ?? CODEX_DEFAULT_TOKEN_BUDGET,
+        byte_budget: null,
         counts_images: false
       };
     default:
       return {
         profile,
         token_budget: explicitBudget ?? GENERIC_DEFAULT_TOKEN_BUDGET,
+        byte_budget: null,
         counts_images: true
       };
   }
@@ -59,6 +75,11 @@ export function estimateClientTokens(
     usage.text.anthropic + (policy.counts_images ? usage.image.anthropic : 0);
 
   switch (policy.profile) {
+    case "grok-build":
+      return {
+        detailed: Math.floor(estimateClientBytes(usage) / 4),
+        coarse: null
+      };
     case "codex":
       return {
         detailed: usage.codex_text_approx,
@@ -77,10 +98,20 @@ export function estimateClientTokens(
   }
 }
 
-export function fitsClientBudget(
+export function estimateClientBytes(usage: ContentUsageEstimate): number {
+  return usage.text_bytes + usage.grok_image_text_bytes + Math.max(0, usage.content_blocks - 1);
+}
+
+export function findClientBudgetOverflow(
   usage: ContentUsageEstimate,
   policy: ClientBudgetPolicy
-): boolean {
+): Extract<TruncateReason, "client_token_budget" | "client_byte_budget"> | null {
+  if (policy.byte_budget !== null && estimateClientBytes(usage) > policy.byte_budget) {
+    return "client_byte_budget";
+  }
+  if (policy.token_budget === null) {
+    return null;
+  }
   const estimate = estimateClientTokens(usage, policy);
 
   if (
@@ -88,10 +119,10 @@ export function fitsClientBudget(
     estimate.coarse !== null &&
     estimate.coarse <= Math.floor(policy.token_budget * CLAUDE_CODE_FAST_PATH_RATIO)
   ) {
-    return true;
+    return null;
   }
 
-  return estimate.detailed <= policy.token_budget;
+  return estimate.detailed <= policy.token_budget ? null : "client_token_budget";
 }
 
 function resolveClientBudgetProfile(
@@ -102,12 +133,16 @@ function resolveClientBudgetProfile(
   if (
     normalizedOverride === "codex" ||
     normalizedOverride === "claude-code" ||
+    normalizedOverride === "grok-build" ||
     normalizedOverride === "generic"
   ) {
     return normalizedOverride;
   }
 
   const clientName = clientInfo?.name?.trim().toLowerCase() ?? "";
+  if (clientName.startsWith("grok-shell-")) {
+    return "grok-build";
+  }
   if (clientName === "claude-code" || clientName.startsWith("claude-code-")) {
     return "claude-code";
   }

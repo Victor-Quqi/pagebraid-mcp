@@ -1,6 +1,11 @@
 import { Tiktoken } from "js-tiktoken/lite";
 import o200kBase from "js-tiktoken/ranks/o200k_base";
 
+import {
+  DEFAULT_IMAGE_MIME_TYPE,
+  GROK_IMAGE_PLACEHOLDER,
+  GROK_MIN_IMAGE_BASE64_LENGTH
+} from "../constants.js";
 import type { ContentUsageEstimate, ModelTokenEstimate } from "../types.js";
 
 const tokenizer = new Tiktoken(o200kBase);
@@ -17,6 +22,9 @@ export const ZERO_CONTENT_USAGE: ContentUsageEstimate = {
   image: { openai: 0, anthropic: 0 },
   codex_text_approx: 0,
   text_characters: 0,
+  text_bytes: 0,
+  content_blocks: 0,
+  grok_image_text_bytes: 0,
   image_count: 0,
   image_pixels: 0,
   image_encoded_bytes: 0,
@@ -55,6 +63,9 @@ export function estimateTextUsage(text: string): ContentUsageEstimate {
       Buffer.byteLength(text, "utf8") / CODEX_APPROX_BYTES_PER_TOKEN
     ),
     text_characters: text.length,
+    text_bytes: Buffer.byteLength(text, "utf8"),
+    content_blocks: 1,
+    grok_image_text_bytes: 0,
     image_count: 0,
     image_pixels: 0,
     image_encoded_bytes: 0,
@@ -66,7 +77,8 @@ export function estimateImageUsage(
   width: number,
   height: number,
   encodedBytes = 0,
-  wireBytes = 0
+  wireBytes = 0,
+  mimeType = DEFAULT_IMAGE_MIME_TYPE
 ): ContentUsageEstimate {
   const normalizedWidth = normalizeDimension(width);
   const normalizedHeight = normalizeDimension(height);
@@ -76,6 +88,12 @@ export function estimateImageUsage(
     image: estimateImageTokens(normalizedWidth, normalizedHeight),
     codex_text_approx: 0,
     text_characters: 0,
+    text_bytes: 0,
+    content_blocks: 1,
+    // Planned images use the placeholder; encoded images also cover Grok's tiny-image path.
+    grok_image_text_bytes: wireBytes > 0 && wireBytes < GROK_MIN_IMAGE_BASE64_LENGTH
+      ? Buffer.byteLength(`data:${mimeType};base64,`, "utf8") + wireBytes
+      : Buffer.byteLength(GROK_IMAGE_PLACEHOLDER, "utf8"),
     image_count: 1,
     image_pixels: normalizedWidth * normalizedHeight,
     image_encoded_bytes: encodedBytes,
@@ -96,6 +114,9 @@ export function addContentUsages(...usages: ContentUsageEstimate[]): ContentUsag
       },
       codex_text_approx: sum.codex_text_approx + usage.codex_text_approx,
       text_characters: sum.text_characters + usage.text_characters,
+      text_bytes: sum.text_bytes + usage.text_bytes,
+      content_blocks: sum.content_blocks + usage.content_blocks,
+      grok_image_text_bytes: sum.grok_image_text_bytes + usage.grok_image_text_bytes,
       image_count: sum.image_count + usage.image_count,
       image_pixels: sum.image_pixels + usage.image_pixels,
       image_encoded_bytes: sum.image_encoded_bytes + usage.image_encoded_bytes,

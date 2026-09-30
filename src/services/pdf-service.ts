@@ -35,8 +35,9 @@ import type {
   TruncateReason
 } from "../types.js";
 import {
+  estimateClientBytes,
   estimateClientTokens,
-  fitsClientBudget,
+  findClientBudgetOverflow,
   resolveClientBudgetPolicy
 } from "./client-budget-policy.js";
 import {
@@ -123,12 +124,60 @@ export async function readPdf(request: ReadPdfRequest): Promise<ReadPdfResult> {
   const requestedRange = resolveRequestedRange(request.pages, cachedDocument.total_pages);
   const imageRenderPolicy = resolveImageRenderPolicy(mode);
   const budgetPolicy = request.budget_policy ?? resolveClientBudgetPolicy(undefined);
-  const imageResourcePolicy =
-    request.image_resource_policy ?? resolveImageResourcePolicy();
+  const imageResourcePolicy = request.image_resource_policy ?? resolveImageResourcePolicy();
 
-  const pages: ReadPdfResult["pages"] = [];
+  const pages: RenderedPage[] = [];
   let accumulatedUsage = ZERO_CONTENT_USAGE;
   let stoppedBy: TruncateReason = "none";
+
+  function summarize(endPage: number, reason: TruncateReason): SummaryInput {
+    const returnedRange = { start_page: requestedRange.start_page, end_page: endPage };
+    const remainingRanges = collectRemainingRanges(requestedRange, returnedRange);
+    return {
+      filePath,
+      totalPages: cachedDocument.total_pages,
+      requestedRange,
+      returnedRange,
+      truncated: remainingRanges.length > 0,
+      truncateReason: remainingRanges.length > 0 ? reason : "none",
+      mode,
+      recommendedNextCall: remainingRanges.length > 0
+        ? buildRecommendedNextCall(filePath, continuationToolName, mode, remainingRanges[0])
+        : null,
+      remainingRanges
+    };
+  }
+
+  function evaluatePage(
+    page: RenderedPage,
+    hasImage: boolean,
+    includeTransport: boolean
+  ): { contentUsage: ContentUsageEstimate; overflow: TruncateReason | null } {
+    const contentUsage = addContentUsages(accumulatedUsage, estimateRenderedPageUsage(page, hasImage));
+    const usage = addContentUsages(
+      contentUsage,
+      // Finishing the request removes continuation metadata, so defer that overhead to the final check.
+      estimateTextUsage(buildSummaryText({ ...summarize(page.page_number, "none"), truncated: false }))
+    );
+    const overflow = findImageResourceOverflow(usage, imageResourcePolicy, budgetPolicy.profile, includeTransport) ??
+      findClientBudgetOverflow(usage, budgetPolicy);
+
+    // A complete page image can carry an oversized first page without losing its content.
+    if (overflow === "client_byte_budget" && pages.length === 0 &&
+        mode === "auto" && hasImage && page.text !== undefined) {
+      page.text = undefined;
+      page.text_omitted = true;
+      return evaluatePage(page, hasImage, includeTransport);
+    }
+    return { contentUsage, overflow };
+  }
+
+  function singlePageByteError(pageNumber: number): Error {
+    return new Error(
+      `Page ${pageNumber} cannot fit within ${budgetPolicy.byte_budget} output bytes.` +
+      (mode === "text_only" ? " Use image_only to read the complete page." : " Increase the client byte limit.")
+    );
+  }
 
   for (let pageNumber = requestedRange.start_page; pageNumber <= requestedRange.end_page; pageNumber += 1) {
     const text = mode === "image_only" ? undefined : await getPageText(cachedDocument, pageNumber);
@@ -141,115 +190,66 @@ export async function readPdf(request: ReadPdfRequest): Promise<ReadPdfResult> {
       image_width: imagePlan?.width,
       image_height: imagePlan?.height
     };
-    const plannedContentUsage = addContentUsages(
-      accumulatedUsage,
-      estimateRenderedPageUsage(plannedPage, imagePlan !== undefined)
-    );
-    const candidateReturnedRange = {
-      start_page: pages[0]?.page_number ?? pageNumber,
-      end_page: pageNumber
-    };
-    const candidateRemainingRanges = collectRemainingRanges(requestedRange, candidateReturnedRange);
-    const candidateTruncated = candidateRemainingRanges.length > 0;
-    const candidateNextCall = candidateTruncated
-      ? buildRecommendedNextCall(filePath, continuationToolName, mode, candidateRemainingRanges[0])
-      : null;
-    const candidateSummaryInput: SummaryInput = {
-      filePath,
-      totalPages: cachedDocument.total_pages,
-      requestedRange,
-      returnedRange: candidateReturnedRange,
-      truncated: candidateTruncated,
-      truncateReason: candidateTruncated ? "client_token_budget" : "none",
-      mode,
-      recommendedNextCall: candidateNextCall,
-      remainingRanges: candidateRemainingRanges
-    };
-    const plannedEstimatedUsage = addContentUsages(
-      plannedContentUsage,
-      estimateTextUsage(buildSummaryText(candidateSummaryInput))
-    );
-
-    if (pages.length > 0 && !fitsClientBudget(plannedEstimatedUsage, budgetPolicy)) {
-      stoppedBy = "client_token_budget";
+    const planned = evaluatePage(plannedPage, imagePlan !== undefined, false);
+    if (planned.overflow && pages.length > 0) {
+      stoppedBy = planned.overflow;
       break;
     }
-
-    const plannedImageOverflow = imageRenderPolicy
-      ? findImageResourceOverflow(
-          plannedEstimatedUsage,
-          imageResourcePolicy,
-          budgetPolicy.profile,
-          false
-        )
-      : null;
-    if (pages.length > 0 && plannedImageOverflow) {
-      stoppedBy = plannedImageOverflow;
-      break;
+    if (planned.overflow === "client_byte_budget") {
+      throw singlePageByteError(pageNumber);
     }
 
     const image = imageRenderPolicy && imagePlan
       ? await getPageImage(cachedDocument, pageNumber, imageRenderPolicy, imagePlan)
       : undefined;
     const renderedPage: RenderedPage = {
-      page_number: pageNumber,
-      text,
+      ...plannedPage,
       image_base64: image?.base64,
       image_mime_type: image?.mime_type,
       image_width: image?.width,
       image_height: image?.height,
       image_encoded_bytes: image?.encoded_bytes
     };
-    const candidateContentUsage = addContentUsages(
-      accumulatedUsage,
-      estimateRenderedPageUsage(renderedPage)
-    );
-    const candidateEstimatedUsage = addContentUsages(
-      candidateContentUsage,
-      estimateTextUsage(buildSummaryText(candidateSummaryInput))
-    );
-    const imageOverflow = imageRenderPolicy
-      ? findImageResourceOverflow(
-          candidateEstimatedUsage,
-          imageResourcePolicy,
-          budgetPolicy.profile,
-          true
-        )
-      : null;
-    if (pages.length > 0 && imageOverflow) {
-      stoppedBy = imageOverflow;
+    const actual = evaluatePage(renderedPage, image !== undefined, true);
+    if (actual.overflow && pages.length > 0) {
+      stoppedBy = actual.overflow;
       break;
+    }
+    if (actual.overflow === "client_byte_budget") {
+      throw singlePageByteError(pageNumber);
     }
 
     pages.push(renderedPage);
-    accumulatedUsage = candidateContentUsage;
+    accumulatedUsage = actual.contentUsage;
   }
 
-  const returnedRange = {
-    start_page: pages[0].page_number,
-    end_page: pages[pages.length - 1].page_number
-  };
-
-  const remainingRanges = collectRemainingRanges(requestedRange, returnedRange);
-  const truncated = remainingRanges.length > 0;
-  const truncateReason: ReadPdfResult["truncate_reason"] = truncated ? stoppedBy : "none";
-  const recommendedNextCall =
-    remainingRanges.length > 0
-      ? buildRecommendedNextCall(filePath, continuationToolName, mode, remainingRanges[0])
-      : null;
-
-  const summaryText = buildSummaryText({
-    filePath,
-    totalPages: cachedDocument.total_pages,
-    requestedRange,
-    returnedRange,
-    truncated,
-    truncateReason,
-    mode,
-    recommendedNextCall,
-    remainingRanges
-  });
-  const finalUsage = addContentUsages(accumulatedUsage, estimateTextUsage(summaryText));
+  // The actual stop reason can change the summary's size. Check the complete response again.
+  let summary: SummaryInput;
+  let summaryText: string;
+  let finalUsage: ContentUsageEstimate;
+  while (true) {
+    summary = summarize(pages[pages.length - 1].page_number, stoppedBy);
+    summaryText = buildSummaryText(summary);
+    finalUsage = addContentUsages(accumulatedUsage, estimateTextUsage(summaryText));
+    const overflow = findClientBudgetOverflow(finalUsage, budgetPolicy);
+    if (!overflow) {
+      break;
+    }
+    if (pages.length > 1) {
+      pages.pop();
+      stoppedBy = overflow;
+    } else if (overflow === "client_byte_budget") {
+      if (mode === "auto" && pages[0].text !== undefined && pages[0].image_base64) {
+        pages[0].text = undefined;
+        pages[0].text_omitted = true;
+      } else {
+        throw singlePageByteError(pages[0].page_number);
+      }
+    } else {
+      break;
+    }
+    accumulatedUsage = addContentUsages(...pages.map(page => estimateRenderedPageUsage(page)));
+  }
   const clientEstimate = estimateClientTokens(finalUsage, budgetPolicy);
   const estimatedTokens: TokenEstimate = {
     ...finalUsage,
@@ -262,15 +262,17 @@ export async function readPdf(request: ReadPdfRequest): Promise<ReadPdfResult> {
     total_pages: cachedDocument.total_pages,
     mode,
     requested_range: requestedRange,
-    returned_range: returnedRange,
-    remaining_ranges: remainingRanges,
+    returned_range: summary.returnedRange,
+    remaining_ranges: summary.remainingRanges,
     returned_pages: pages.map(page => page.page_number),
-    truncated,
-    truncate_reason: truncateReason,
+    truncated: summary.truncated,
+    truncate_reason: summary.truncateReason,
     client_profile: budgetPolicy.profile,
     token_budget: budgetPolicy.token_budget,
+    byte_budget: budgetPolicy.byte_budget,
+    estimated_client_bytes: budgetPolicy.byte_budget === null ? null : estimateClientBytes(finalUsage),
     estimated_tokens: estimatedTokens,
-    recommended_next_call: recommendedNextCall,
+    recommended_next_call: summary.recommendedNextCall,
     pages,
     summary_text: summaryText
   };
@@ -399,7 +401,7 @@ function estimateRenderedPageUsage(
 
   if (hasImage) {
     if (page.text === undefined) {
-      estimates.push(estimateTextUsage(buildPdfImageMarker(page.page_number)));
+      estimates.push(estimateTextUsage(buildPdfImageMarker(page.page_number, page.text_omitted)));
     }
 
     estimates.push(
@@ -407,7 +409,8 @@ function estimateRenderedPageUsage(
         page.image_width ?? 1,
         page.image_height ?? 1,
         page.image_encoded_bytes ?? 0,
-        page.image_base64?.length ?? 0
+        page.image_base64?.length ?? 0,
+        page.image_mime_type
       )
     );
   }

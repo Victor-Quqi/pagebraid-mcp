@@ -1,7 +1,9 @@
 import {
   DEFAULT_IMAGE_CONTEXT_TOKEN_BUDGET,
   DEFAULT_IMAGE_RENDER_PIXEL_BUDGET,
-  DEFAULT_IMAGE_WIRE_BUDGET_BYTES
+  DEFAULT_IMAGE_WIRE_BUDGET_BYTES,
+  GROK_IMAGE_TOKEN_ESTIMATE,
+  GROK_MAX_IMAGES
 } from "../constants.js";
 import type {
   ClientBudgetProfile,
@@ -32,8 +34,11 @@ export function findImageResourceOverflow(
   policy: ImageResourcePolicy,
   profile: ClientBudgetProfile,
   includeTransport: boolean
-): Exclude<TruncateReason, "none" | "client_token_budget"> | null {
-  if (policy.max_images !== null && usage.image_count > policy.max_images) {
+): Exclude<TruncateReason, "none" | "client_token_budget" | "client_byte_budget"> | null {
+  const maxImages = profile === "grok-build"
+    ? Math.min(policy.max_images ?? GROK_MAX_IMAGES, GROK_MAX_IMAGES)
+    : policy.max_images;
+  if (maxImages !== null && usage.image_count > maxImages) {
     return "image_count_limit";
   }
 
@@ -57,6 +62,8 @@ function selectImageContextTokens(
   profile: ClientBudgetProfile
 ): number {
   switch (profile) {
+    case "grok-build":
+      return usage.image_count * GROK_IMAGE_TOKEN_ESTIMATE;
     case "codex":
       return usage.image.openai;
     case "claude-code":

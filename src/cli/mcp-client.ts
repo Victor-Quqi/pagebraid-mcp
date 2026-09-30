@@ -63,7 +63,8 @@ function getBudgetEnvironment(): Record<string, string> {
   const entries = Object.entries(process.env).filter(
     (entry): entry is [string, string] =>
       entry[1] !== undefined &&
-      (entry[0].startsWith("PAGEBRAID_") || entry[0] === "MAX_MCP_OUTPUT_TOKENS")
+      (entry[0].startsWith("PAGEBRAID_") ||
+        ["MAX_MCP_OUTPUT_TOKENS", "GROK_MAX_MCP_OUTPUT_BYTES", "MAX_MCP_OUTPUT_BYTES"].includes(entry[0]))
   );
 
   return Object.fromEntries(entries);

@@ -82,7 +82,7 @@ To use a local build:
 ## Debug CLI
 
 `pagebraid-debug` starts the server over stdio and calls `read_pdf`. Returned text blocks are written as `.txt`, image blocks are decoded to files, and `manifest.json` keeps the MCP block order.
-`PAGEBRAID_*` and `MAX_MCP_OUTPUT_TOKENS` from the current shell are forwarded to the debug server.
+`PAGEBRAID_*`, `MAX_MCP_OUTPUT_TOKENS`, `GROK_MAX_MCP_OUTPUT_BYTES`, and `MAX_MCP_OUTPUT_BYTES` from the current shell are forwarded to the debug server.
 
 ```bash
 pagebraid-debug read-pdf ./paper.pdf --pages 3 --mode auto
@@ -111,7 +111,7 @@ Behavior:
 - `auto` returns text plus page images
 - `text_only` returns only text
 - `image_only` returns only page images
-- Response size adapts to detected Codex and Claude Code clients; unknown clients use a conservative fallback
+- Response size adapts to detected Codex, Claude Code, and Grok Build clients; unknown clients use a conservative fallback
 - Image clarity does not decrease with the requested page count; large image reads are split by context, rendering, and transfer budgets
 - If truncation happens, the response includes the remaining page range and a recommended next call
 
@@ -119,8 +119,11 @@ Behavior:
 
 Set these variables in the MCP server's environment configuration:
 
-- `PAGEBRAID_CLIENT_PROFILE` selects `codex`, `claude-code`, or `generic` explicitly
+- `PAGEBRAID_CLIENT_PROFILE` selects `codex`, `claude-code`, `grok-build`, or `generic` explicitly
 - `PAGEBRAID_TOKEN_BUDGET` overrides the detected token budget
+- `PAGEBRAID_BYTE_BUDGET` overrides the Grok Build text byte budget; match the client's effective limit
+
+Grok Build defaults to 20,000 text bytes and 5 images per response. It also reads `GROK_MAX_MCP_OUTPUT_BYTES` or `MAX_MCP_OUTPUT_BYTES` from the server environment. When one page's text exceeds the limit, `auto` returns its image with `text=omitted`; `text_only` asks for `image_only`.
 
 Image resource budgets normally need no configuration. Advanced overrides are documented in `docs/implementation-notes.md`.
 

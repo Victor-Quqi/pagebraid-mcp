@@ -1,9 +1,10 @@
 export type ReadMode = "auto" | "text_only" | "image_only";
 export type ImageMimeType = "image/jpeg" | "image/webp";
-export type ClientBudgetProfile = "codex" | "claude-code" | "generic";
+export type ClientBudgetProfile = "codex" | "claude-code" | "grok-build" | "generic";
 export type TruncateReason =
   | "none"
   | "client_token_budget"
+  | "client_byte_budget"
   | "image_context_budget"
   | "image_render_budget"
   | "image_transport_budget"
@@ -26,6 +27,7 @@ export interface ReadPdfRequest {
 export interface RenderedPage {
   page_number: number;
   text?: string;
+  text_omitted?: boolean;
   image_base64?: string;
   image_mime_type?: ImageMimeType;
   image_width?: number;
@@ -43,6 +45,9 @@ export interface ContentUsageEstimate {
   image: ModelTokenEstimate;
   codex_text_approx: number;
   text_characters: number;
+  text_bytes: number;
+  content_blocks: number;
+  grok_image_text_bytes: number;
   image_count: number;
   image_pixels: number;
   image_encoded_bytes: number;
@@ -56,7 +61,8 @@ export interface TokenEstimate extends ContentUsageEstimate {
 
 export interface ClientBudgetPolicy {
   profile: ClientBudgetProfile;
-  token_budget: number;
+  token_budget: number | null;
+  byte_budget: number | null;
   counts_images: boolean;
 }
 
@@ -78,7 +84,9 @@ export interface ReadPdfResult {
   truncated: boolean;
   truncate_reason: TruncateReason;
   client_profile: ClientBudgetProfile;
-  token_budget: number;
+  token_budget: number | null;
+  byte_budget: number | null;
+  estimated_client_bytes: number | null;
   estimated_tokens: TokenEstimate;
   pages: RenderedPage[];
   recommended_next_call: string | null;
