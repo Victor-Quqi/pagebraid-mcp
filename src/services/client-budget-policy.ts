@@ -13,6 +13,9 @@ import type {
 } from "../types.js";
 
 const CLAUDE_CODE_IMAGE_FAST_ESTIMATE = 1_600;
+// Interactive sessions append "[Image: source: <saved path>]" after each image before the size check.
+const CLAUDE_CODE_IMAGE_LABEL_FAST_ESTIMATE = 64;
+const CLAUDE_CODE_IMAGE_LABEL_TOKENS = 128;
 
 interface McpClientInfo {
   name?: string;
@@ -87,8 +90,9 @@ export function estimateClientTokens(
       };
     case "claude-code":
       return {
-        detailed: anthropicDetailed,
-        coarse: estimateClaudeCodeFastPathTokens(usage)
+        detailed: anthropicDetailed + usage.image_count * CLAUDE_CODE_IMAGE_LABEL_TOKENS,
+        // Claude Code only checks results with images, so only those mirror its fast path.
+        coarse: usage.image_count > 0 ? estimateClaudeCodeFastPathTokens(usage) : null
       };
     default:
       return {
@@ -156,8 +160,8 @@ function resolveClientBudgetProfile(
 
 function estimateClaudeCodeFastPathTokens(usage: ContentUsageEstimate): number {
   return (
-    Math.ceil(usage.text_characters / 4) +
-    usage.image_count * CLAUDE_CODE_IMAGE_FAST_ESTIMATE
+    usage.claude_code_text_approx +
+    usage.image_count * (CLAUDE_CODE_IMAGE_FAST_ESTIMATE + CLAUDE_CODE_IMAGE_LABEL_FAST_ESTIMATE)
   );
 }
 

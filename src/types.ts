@@ -44,7 +44,7 @@ export interface ContentUsageEstimate {
   text: ModelTokenEstimate;
   image: ModelTokenEstimate;
   codex_text_approx: number;
-  text_characters: number;
+  claude_code_text_approx: number;
   text_bytes: number;
   content_blocks: number;
   grok_image_text_bytes: number;

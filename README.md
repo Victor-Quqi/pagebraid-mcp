@@ -123,6 +123,8 @@ Set these variables in the MCP server's environment configuration:
 - `PAGEBRAID_TOKEN_BUDGET` overrides the detected token budget
 - `PAGEBRAID_BYTE_BUDGET` overrides the Grok Build text byte budget; match the client's effective limit
 
+If you set Codex's `tool_output_token_limit` or `[mcp_servers.<name>.tools.read_pdf] output_token_limit` to N, set `PAGEBRAID_TOKEN_BUDGET` to `ceil(N × 1.2) - 9`. For example, N = 20000 corresponds to 23991.
+
 Grok Build defaults to 20,000 text bytes and 5 images per response. It also reads `GROK_MAX_MCP_OUTPUT_BYTES` or `MAX_MCP_OUTPUT_BYTES` from the server environment. When one page's text exceeds the limit, `auto` returns its image with `text=omitted`; `text_only` asks for `image_only`.
 
 Image resource budgets normally need no configuration. Advanced overrides are documented in `docs/implementation-notes.md`.

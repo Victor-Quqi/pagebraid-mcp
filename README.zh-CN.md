@@ -123,6 +123,8 @@ pagebraid-debug read-pdf ./paper.pdf --server-command node --server-arg dist/ind
 - `PAGEBRAID_TOKEN_BUDGET` 可覆盖检测到的 token 预算
 - `PAGEBRAID_BYTE_BUDGET` 可覆盖 Grok Build 的文本字节预算，需与客户端实际额度一致
 
+如果在 Codex 中把 `tool_output_token_limit` 或 `[mcp_servers.<name>.tools.read_pdf] output_token_limit` 设为 N，请将 `PAGEBRAID_TOKEN_BUDGET` 设为 `ceil(N × 1.2) - 9`。例如 N = 20000 对应 23991。
+
 Grok Build 默认每次最多返回 20,000 字节文本和 5 张图片；也会读取 server 环境中的 `GROK_MAX_MCP_OUTPUT_BYTES` 或 `MAX_MCP_OUTPUT_BYTES`。单页文字超限时，`auto` 返回该页图像并标记 `text=omitted`；`text_only` 提示使用 `image_only`。
 
 图片资源预算通常无需配置，高级覆盖项见 `docs/implementation-notes.md`。

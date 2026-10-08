@@ -11,7 +11,8 @@ import type { ContentUsageEstimate, ModelTokenEstimate } from "../types.js";
 const tokenizer = new Tiktoken(o200kBase);
 
 const CODEX_APPROX_BYTES_PER_TOKEN = 4;
-const ANTHROPIC_NEW_TOKENIZER_MULTIPLIER = 1.3;
+const CLAUDE_CODE_APPROX_CHARS_PER_TOKEN = 4;
+const ANTHROPIC_NEW_TOKENIZER_MULTIPLIER = 1.7;
 const OPENAI_IMAGE_PATCH_SIZE = 32;
 const ANTHROPIC_IMAGE_PATCH_SIZE = 28;
 const ANTHROPIC_HIGH_RES_MAX_EDGE = 2_576;
@@ -21,7 +22,7 @@ export const ZERO_CONTENT_USAGE: ContentUsageEstimate = {
   text: { openai: 0, anthropic: 0 },
   image: { openai: 0, anthropic: 0 },
   codex_text_approx: 0,
-  text_characters: 0,
+  claude_code_text_approx: 0,
   text_bytes: 0,
   content_blocks: 0,
   grok_image_text_bytes: 0,
@@ -62,7 +63,7 @@ export function estimateTextUsage(text: string): ContentUsageEstimate {
     codex_text_approx: Math.ceil(
       Buffer.byteLength(text, "utf8") / CODEX_APPROX_BYTES_PER_TOKEN
     ),
-    text_characters: text.length,
+    claude_code_text_approx: Math.round(text.length / CLAUDE_CODE_APPROX_CHARS_PER_TOKEN),
     text_bytes: Buffer.byteLength(text, "utf8"),
     content_blocks: 1,
     grok_image_text_bytes: 0,
@@ -87,7 +88,7 @@ export function estimateImageUsage(
     text: { openai: 0, anthropic: 0 },
     image: estimateImageTokens(normalizedWidth, normalizedHeight),
     codex_text_approx: 0,
-    text_characters: 0,
+    claude_code_text_approx: 0,
     text_bytes: 0,
     content_blocks: 1,
     // Planned images use the placeholder; encoded images also cover Grok's tiny-image path.
@@ -113,7 +114,7 @@ export function addContentUsages(...usages: ContentUsageEstimate[]): ContentUsag
         anthropic: sum.image.anthropic + usage.image.anthropic
       },
       codex_text_approx: sum.codex_text_approx + usage.codex_text_approx,
-      text_characters: sum.text_characters + usage.text_characters,
+      claude_code_text_approx: sum.claude_code_text_approx + usage.claude_code_text_approx,
       text_bytes: sum.text_bytes + usage.text_bytes,
       content_blocks: sum.content_blocks + usage.content_blocks,
       grok_image_text_bytes: sum.grok_image_text_bytes + usage.grok_image_text_bytes,

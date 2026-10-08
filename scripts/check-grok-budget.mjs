@@ -7,11 +7,11 @@ import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { loadImage } from "@napi-rs/canvas";
-import { resolveClientBudgetPolicy, estimateClientBytes } from "../src/services/client-budget-policy.ts";
+import { resolveClientBudgetPolicy, estimateClientBytes, estimateClientTokens } from "../src/services/client-budget-policy.ts";
 import { resolveImageResourcePolicy } from "../src/services/image-resource-policy.ts";
 import { readPdf } from "../src/services/pdf-service.ts";
 import { buildReadPdfContent, limitTextBytes } from "../src/services/read-pdf-content.ts";
-import { estimateImageUsage, estimateTextUsage } from "../src/services/token-budget.ts";
+import { addContentUsages, estimateImageUsage, estimateTextUsage } from "../src/services/token-budget.ts";
 
 const run = promisify(execFile);
 const root = path.resolve(import.meta.dirname, "..");
@@ -51,8 +51,12 @@ try {
   for (const name of ["codex", "claude-code", "unknown"]) {
     const p = resolveClientBudgetPolicy({ name }, { GROK_MAX_MCP_OUTPUT_BYTES: "1" });
     assert.equal(p.byte_budget, null);
-    assert.equal(p.token_budget, name === "codex" ? 11900 : name === "claude-code" ? 25000 : 10000);
+    assert.equal(p.token_budget, name === "codex" ? 11991 : name === "claude-code" ? 25000 : 10000);
   }
+  const claudeCode = resolveClientBudgetPolicy({ name: "claude-code" }, {});
+  const pageText = estimateTextUsage("x".repeat(402));
+  assert.equal(estimateClientTokens(pageText, claudeCode).coarse, null);
+  assert.equal(estimateClientTokens(addContentUsages(pageText, estimateImageUsage(10, 10)), claudeCode).coarse, 101 + 1664);
   assert.equal(estimateClientBytes(estimateTextUsage("中文😀")), 10);
   assert.equal(limitTextBytes("中文😀", 8), "中文");
   assert.equal(limitTextBytes("中文😀", 10), "中文😀");
@@ -103,6 +107,8 @@ try {
     try {
       await client.connect(new StdioClientTransport({ command: process.execPath,
         args: [path.join(root, "dist/index.js")], env: cleanEnv, stderr: "inherit" }));
+      const { tools } = await client.listTools();
+      assert.equal(tools.find(tool => tool.name === "read_pdf")?._meta?.["anthropic/maxResultSizeChars"], 500000);
       const result = await client.callTool({ name: "read_pdf", arguments: { file_path: fixture, mode: "image_only" } });
       assert.equal(result.isError, undefined);
       assert.equal(result.content.filter(block => block.type === "image").length, 5);
@@ -113,7 +119,7 @@ try {
     } finally {
       await client.close();
     }
-    console.log(`${mode}: Grok identity detection and oversized-page errors verified`);
+    console.log(`${mode}: Grok identity detection, oversized-page errors and tool metadata verified`);
   }
   const { stdout: overrideOutput } = await run(process.execPath, [path.join(root, "dist/cli.js"), "read-pdf", fixture,
     "--mode", "text_only", "--out", temp, "--raw-result", "--json"], {

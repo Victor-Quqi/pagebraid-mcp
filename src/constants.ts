@@ -20,7 +20,8 @@ export const DEFAULT_IMAGE_CONTEXT_TOKEN_BUDGET = 40_000;
 export const DEFAULT_IMAGE_RENDER_PIXEL_BUDGET = 60_000_000;
 export const DEFAULT_IMAGE_WIRE_BUDGET_BYTES = 6 * 1_024 * 1_024;
 export const DEFAULT_IMAGE_CACHE_WIRE_BYTES = 64 * 1_024 * 1_024;
-export const CODEX_DEFAULT_TOKEN_BUDGET = 11_900;
+// Codex's 12,000-token limit minus its 9-token "Wall time" header block.
+export const CODEX_DEFAULT_TOKEN_BUDGET = 11_991;
 export const CLAUDE_CODE_DEFAULT_TOKEN_BUDGET = 25_000;
 export const GENERIC_DEFAULT_TOKEN_BUDGET = 10_000;
 export const GROK_DEFAULT_BYTE_BUDGET = 20_000;
@@ -29,5 +30,6 @@ export const GROK_IMAGE_TOKEN_ESTIMATE = 765;
 export const GROK_IMAGE_PLACEHOLDER = "[image content will be provided separately]";
 export const GROK_MIN_IMAGE_BASE64_LENGTH = 1_024;
 export const CLAUDE_CODE_FAST_PATH_RATIO = 0.5;
+export const CLAUDE_CODE_MAX_RESULT_SIZE_CHARS = 500_000;
 export const LINE_MERGE_TOLERANCE = 3;
 export const WORD_BREAK_GAP = 12;

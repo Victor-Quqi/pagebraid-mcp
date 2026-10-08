@@ -32,23 +32,22 @@
 
 ## 读取策略
 
-工具从 MCP initialize 信息读取客户端名称，并在每次调用时选择预算 profile。`PAGEBRAID_CLIENT_PROFILE` 可显式覆盖为 `codex`、`claude-code`、`grok-build` 或 `generic`。
+工具从 MCP initialize 信息读取客户端名称，并在每次调用时选择预算 profile。`PAGEBRAID_CLIENT_PROFILE` 可显式覆盖为 `codex`、`claude-code`、`grok-build` 或 `generic`。读取按页累加，直到下一页会使结果超出客户端预算或下文的图片资源预算。
 
-- Codex profile 默认 11,900 token；每个文本 block 按 `ceil(UTF-8 字节数 ÷ 4)` 累计，图片不进入客户端的 MCP 输出截断预算
+- Codex profile 默认 11,991 token：模型 `truncation_policy` 的 10,000 token 乘 1.2 为 12,000 上限，Codex 在结果前插入的 `Wall time` 头占 9 token；每个文本 block 按 `ceil(UTF-8 字节数 ÷ 4)` 累计，图片不计入
 - Claude Code profile 默认 25,000 token；server 进程环境中存在有效的 `MAX_MCP_OUTPUT_TOKENS` 时继承该值
-- Claude Code 先用 `文本字符数 ÷ 4 + 图片数 × 1600` 走快速判断；不超过预算一半时直接放行，超过后使用详细估算
+- 含图片的结果由 Claude Code 判定：各文本块 `round(字符数 ÷ 4)` 之和加每张图 1,600 不超过预算一半时直接放行，否则按 `count_tokens` 判定。pagebraid 按同样的两级规则计算，以便不截断地返回最多页数。交互式会话会在判定前为每张图追加 `[Image: source: <保存路径>]`，实测约 180 字符、110 token，两级估算分别为每张图另计 64 和 128
+- `read_pdf` 声明 `_meta["anthropic/maxResultSizeChars"] = 500000`，避免纯文本结果超过 50,000 字符即被转存。Claude Code 因此不再检查不含图片的结果，pagebraid 只用详细估算对照预算，作为防止失控的上限
 - Grok Build profile 匹配 `grok-shell-*`，默认 20,000 UTF-8 字节，按实际文本、图片占位符和块间换行累计，每次最多 5 张图片
 - Generic profile 默认 10,000 token，累计文本和图片，并取两路详细估算的较大值
 - `PAGEBRAID_TOKEN_BUDGET` 的优先级最高，可覆盖上述 token 预算；Grok 默认只检查字节，显式设置此项时增加一项 token 限制
 - Grok 字节预算依次取 `PAGEBRAID_BYTE_BUDGET`、`GROK_MAX_MCP_OUTPUT_BYTES`、`MAX_MCP_OUTPUT_BYTES`、20,000；只读取 server 进程环境中有效的正整数
 
-Codex 默认值来自当前 agent-facing 挂载 MCP 路径的 12,000 token 实测上限，预留 100 token 给外层包装和估算误差。
+上述行为对应 Codex CLI 0.160.1、Claude Code 2.1.284 和 grok 1.0.46。
 
-预算策略已通过最新版 Codex CLI 0.144.1 和 Claude Code 2.1.205 的 agent-facing E2E；后者落后当前版本两个补丁，其间无相关改动。
+模型上下文的两路详细估算参数对应当前 Claude 与 GPT 旗舰模型。文本分别使用 `o200k_base` 计数，以及 `ceil(o200k_base 计数 × 1.7)`；Claude 5 系列实测英文正文约为 `o200k_base` 的 1.6 倍，中文约 1.2 倍，代码可达 1.86 倍。图片按实际渲染宽高，分别使用 32 px patch 和带尺寸、token 上限的 28 px patch 算法。摘要和内容 marker 也计入文本。Codex profile 的客户端预算只使用字节近似值。
 
-模型上下文的两路详细估算参数对应当前 Claude 与 GPT 旗舰模型。文本分别使用 `o200k_base` 计数，以及 `ceil(o200k_base 计数 × 1.3)`；图片按实际渲染宽高，分别使用 32 px patch 和带尺寸、token 上限的 28 px patch 算法。摘要和内容 marker 也计入文本。Codex profile 的客户端预算判断采用上一条的字节近似值。
-
-MCP initialize 当前不协商工具输出预算。Claude Code 的远程灰度值和 Codex 的模型侧配置无法由 server 直接读取；默认值变化时需同步实现，或通过 `PAGEBRAID_TOKEN_BUDGET` 对齐客户端。
+MCP 不协商工具输出预算，客户端侧的额度调整无法由 server 读取，需通过 `PAGEBRAID_TOKEN_BUDGET` 对齐，例如 Claude Code 的远程灰度值。Codex 的 `tool_output_token_limit` 或 `[mcp_servers.<name>.tools.read_pdf] output_token_limit` 设为 N 时，该值取 `ceil(N × 1.2) − 9`。
 
 图片批次另有三项资源预算：图片上下文估算默认 40,000 token，累计渲染量默认 60,000,000 px，base64 图像载荷默认 6 MiB。它们分别可用 `PAGEBRAID_IMAGE_CONTEXT_TOKEN_BUDGET`、`PAGEBRAID_IMAGE_RENDER_PIXEL_BUDGET` 和 `PAGEBRAID_IMAGE_WIRE_BUDGET_BYTES` 覆盖。Codex 与 Claude Code profile 分别采用对应的图片估算，Grok 按客户端上下文粗估计每张图 765 token，Generic profile 取两路较大值。
 

@@ -1,6 +1,7 @@
 import { CLIENT_INFO_META_KEY } from "@modelcontextprotocol/server";
 import type { McpServer, ServerContext } from "@modelcontextprotocol/server";
 
+import { CLAUDE_CODE_MAX_RESULT_SIZE_CHARS } from "../constants.js";
 import { ReadPdfInputSchema } from "../schemas/read-pdf.js";
 import { resolveClientBudgetPolicy } from "../services/client-budget-policy.js";
 import { readPdf } from "../services/pdf-service.js";
@@ -24,6 +25,10 @@ export function registerReadPdfTool(server: McpServer): void {
         destructiveHint: false,
         idempotentHint: true,
         openWorldHint: false
+      },
+      // Avoids Claude Code's 50,000-character spill; the claude-code profile bounds text-only results instead.
+      _meta: {
+        "anthropic/maxResultSizeChars": CLAUDE_CODE_MAX_RESULT_SIZE_CHARS
       }
     },
     async (params, context) => {
